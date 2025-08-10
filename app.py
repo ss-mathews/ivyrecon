@@ -97,7 +97,7 @@ def load_any(uploaded) -> pd.DataFrame | None:
         return None
 
 # Color-row styling based on Error Type
-def style_errors(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+def style_errors(df: pd.DataFrame):
     if df is None or df.empty:
         return df
     def _row_style(row):
@@ -109,8 +109,7 @@ def style_errors(df: pd.DataFrame) -> pd.io.formats.style.Styler:
         if "Duplicate SSN" in et:
             return ["background-color: #EFF6FF"] * len(row)  # blue soft
         return [""] * len(row)
-    styler = df.style.apply(_row_style, axis=1)
-    return styler
+    return df.style.apply(_row_style, axis=1)
 
 # Quick stats block
 
