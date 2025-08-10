@@ -39,7 +39,7 @@ credentials = {
     }
 }
 authenticator = stauth.Authenticate(credentials, "ivyrecon_cookies", "ivyrecon_key", cookie_expiry_days=1)
-name, auth_status, username = authenticator.login("Login", "main")
+name, auth_status, username = authenticator.login(location="main")
 
 if auth_status is False:
     st.error("Invalid credentials")
@@ -51,7 +51,7 @@ elif auth_status is None:
 with st.sidebar:
     st.write(f"**Signed in as:** {name}")
     if st.button("Logout"):
-        authenticator.logout("Logout", "sidebar")
+        authenticator.logout(location="sidebar")
         st.stop()
 
 st.title("IvyRecon")
