@@ -1,4 +1,4 @@
-# app.py — IvyRecon (Polished UI)
+# app.py — IvyRecon (Clean Run tab + Insights + Reset)
 import os
 from datetime import datetime
 import pandas as pd
@@ -32,28 +32,17 @@ st.markdown(
     .chip.yellow { background:#FFFBEB; border-color:#FEF3C7; }
     .chip.blue { background:#EFF6FF; border-color:#DBEAFE; }
     .chip.green { background:#ECFDF5; border-color:#D1FAE5; }
-    /* Dataframe tweaks */
-    .stDataFrame { border-radius: 12px; }
     </style>
     ''',
     unsafe_allow_html=True,
 )
 
 # ---------------- Auth (email + password admin) ----------------
-# Prefer reading from Secrets; fallback to env for portability
 ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL") or os.environ.get("ADMIN_EMAIL", "admin@example.com")
 ADMIN_NAME = st.secrets.get("ADMIN_NAME") or os.environ.get("ADMIN_NAME", "Admin")
 ADMIN_PASSWORD_HASH = st.secrets.get("ADMIN_PASSWORD_HASH") or os.environ.get("ADMIN_PASSWORD_HASH", "$2b$12$PLACEHOLDER")
 
-credentials = {
-    "usernames": {
-        ADMIN_EMAIL: {
-            "email": ADMIN_EMAIL,
-            "name": ADMIN_NAME,
-            "password": ADMIN_PASSWORD_HASH,
-        }
-    }
-}
+credentials = {"usernames": {ADMIN_EMAIL: {"email": ADMIN_EMAIL, "name": ADMIN_NAME, "password": ADMIN_PASSWORD_HASH}}}
 
 authenticator = stauth.Authenticate(
     credentials=credentials,
@@ -62,20 +51,16 @@ authenticator = stauth.Authenticate(
     cookie_expiry_days=1,
 )
 
-# Render login & read session state (new API)
 authenticator.login(location="main")
 auth_status = st.session_state.get("authentication_status")
 name = st.session_state.get("name")
 username = st.session_state.get("username")
 
 if auth_status is False:
-    st.error("Invalid credentials")
-    st.stop()
+    st.error("Invalid credentials"); st.stop()
 elif auth_status is None:
-    st.info("Enter your email and password to continue.")
-    st.stop()
+    st.info("Enter your email and password to continue."); st.stop()
 
-# Signed-in sidebar w/ logout
 with st.sidebar:
     st.markdown(f"**Signed in as:** {name or username}")
     authenticator.logout(location="sidebar")
@@ -84,6 +69,13 @@ with st.sidebar:
 
 # ---------------- Helpers ----------------
 REQUIRED_COLS = ["SSN", "First Name", "Last Name", "Plan Name", "Employee Cost", "Employer Cost"]
+
+# session keys for resetting uploaders
+if "upl_ver" not in st.session_state:
+    st.session_state["upl_ver"] = 0
+if "ran" not in st.session_state:
+    st.session_state["ran"] = False
+
 
 def load_any(uploaded) -> pd.DataFrame | None:
     if not uploaded:
@@ -97,6 +89,7 @@ def load_any(uploaded) -> pd.DataFrame | None:
         return None
 
 # Color-row styling based on Error Type
+
 def style_errors(df: pd.DataFrame):
     if df is None or df.empty:
         return df
@@ -115,8 +108,7 @@ def style_errors(df: pd.DataFrame):
 
 def quick_stats(df: pd.DataFrame, label: str):
     if df is None or df.empty:
-        st.metric(f"{label} Rows", 0, help="No file uploaded yet")
-        return
+        st.metric(f"{label} Rows", 0, help="No file uploaded yet"); return
     c1, c2, c3 = st.columns(3)
     with c1: st.metric(f"{label} Rows", len(df))
     with c2: st.metric(f"{label} Unique Employees", df["SSN"].astype(str).nunique() if "SSN" in df.columns else 0)
@@ -126,69 +118,62 @@ def quick_stats(df: pd.DataFrame, label: str):
 
 def render_error_chips(summary_df: pd.DataFrame):
     if summary_df is None or summary_df.empty:
-        st.markdown('<div class="chip green"><b>No Errors</b></div>', unsafe_allow_html=True)
-        return
-    # Remove Total from per-type chips; show it last
-    total = 0
-    chips = []
+        st.markdown('<div class="chip green"><b>No Errors</b></div>', unsafe_allow_html=True); return
+    total = 0; chips = []
     for _, r in summary_df.iterrows():
         et, cnt = str(r["Error Type"]), int(r["Count"])
-        if et.lower() == "total":
-            total = cnt
-            continue
+        if et.lower() == "total": total = cnt; continue
         color = "blue"
         if et.startswith("Missing in"): color = "yellow"
         elif "Mismatch" in et: color = "red"
         elif "Duplicate" in et: color = "blue"
         chips.append(f'<div class="chip {color}"><b>{cnt}</b> {et}</div>')
-    if total:
-        chips.append(f'<div class="chip"><b>Total:</b> {total}</div>')
+    if total: chips.append(f'<div class="chip"><b>Total:</b> {total}</div>')
     st.markdown(" ".join(chips), unsafe_allow_html=True)
 
-    # Compute an approximate unique lines-compared count based on SSN+Plan keys across uploads
+# Unique lines compared (proxy: SSN + Plan)
+
 def _unique_keys_count(*dfs: pd.DataFrame) -> int:
     keys = set()
     for df in dfs:
-        if df is None or df.empty:
-            continue
+        if df is None or df.empty: continue
         cols = {c.lower(): c for c in df.columns}
-        ssn_col = cols.get("ssn")
-        plan_col = cols.get("plan name") or cols.get("plan")
+        ssn_col = cols.get("ssn"); plan_col = cols.get("plan name") or cols.get("plan")
         if ssn_col and plan_col:
             ssn_series = df[ssn_col].astype(str).str.replace(r"\D", "", regex=True)
             plan_series = df[plan_col].astype(str).str.strip().str.lower()
             for ssn, plan in zip(ssn_series, plan_series):
                 keys.add(f"{ssn}||{plan}")
         else:
-            # fallback so we don't get zero if headers are odd
             keys.update([f"row-{i}-df-{id(df)}" for i in range(len(df))])
     return len(keys)
 
-# Quick insights block shown after Run
-def render_quick_insights(summary_df: pd.DataFrame, compared_lines: int, minutes_per_line: float, hourly_rate: float):
-    total_errors = 0
-    most_common = "—"
+# Quick insights block
+
+def render_quick_insights(summary_df: pd.DataFrame, errors_df: pd.DataFrame, compared_lines: int, minutes_per_line: float, hourly_rate: float):
+    total_errors = 0; most_common = "—"; mismatch_pct = 0.0
     if summary_df is not None and not summary_df.empty:
-        # total errors (from Summary's 'Total' row)
         for _, r in summary_df.iterrows():
-            if str(r["Error Type"]).lower() == "total":
-                total_errors = int(r["Count"]); break
-        # most common error (excluding Total)
+            if str(r["Error Type"]).lower() == "total": total_errors = int(r["Count"]); break
         filt = summary_df[summary_df["Error Type"].str.lower() != "total"] if "Error Type" in summary_df.columns else summary_df
         if not filt.empty:
             top = filt.sort_values("Count", ascending=False).iloc[0]
             most_common = f"{top['Error Type']} ({int(top['Count'])})"
+    if errors_df is not None and not errors_df.empty and compared_lines:
+        mismatch_count = (errors_df["Error Type"] == "Plan Name Mismatch").sum()
+        mismatch_pct = mismatch_count / compared_lines
 
     error_rate = (total_errors / compared_lines) if compared_lines else 0.0
     minutes_saved = compared_lines * minutes_per_line
     hours_saved = minutes_saved / 60.0
     dollars_saved = hours_saved * hourly_rate
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     with m1: st.metric("Lines Reconciled", f"{compared_lines:,}")
     with m2: st.metric("Error Rate", f"{error_rate:.1%}", help="Total errors / lines compared")
-    with m3: st.metric("Most Common Error", most_common)
-    with m4: st.metric("Time Saved (hrs)", f"{hours_saved:,.1f}")
+    with m3: st.metric("Plan Mismatch %", f"{mismatch_pct:.1%}")
+    with m4: st.metric("Most Common Error", most_common)
+    with m5: st.metric("Time Saved (hrs)", f"{hours_saved:,.1f}")
     st.caption(f"Estimated savings at ${hourly_rate:,.0f}/hr and {minutes_per_line:.1f} min/line ≈ **${dollars_saved:,.0f}**.")
 
 # ---------------- Tabs ----------------
@@ -205,11 +190,11 @@ with run_tab:
         st.subheader("Upload Files")
         up1, up2, up3 = st.columns(3)
         with up1:
-            payroll_file = st.file_uploader("Payroll (CSV/XLSX)", type=["csv", "xlsx"], key="payroll")
+            payroll_file = st.file_uploader("Payroll (CSV/XLSX)", type=["csv", "xlsx"], key=f"payroll_{st.session_state.upl_ver}")
         with up2:
-            carrier_file = st.file_uploader("Carrier (CSV/XLSX)", type=["csv", "xlsx"], key="carrier")
+            carrier_file = st.file_uploader("Carrier (CSV/XLSX)", type=["csv", "xlsx"], key=f"carrier_{st.session_state.upl_ver}")
         with up3:
-            benadmin_file = st.file_uploader("BenAdmin (CSV/XLSX)", type=["csv", "xlsx"], key="benadmin")
+            benadmin_file = st.file_uploader("BenAdmin (CSV/XLSX)", type=["csv", "xlsx"], key=f"benadmin_{st.session_state.upl_ver}")
         st.markdown("**Required Columns:** `SSN, First Name, Last Name, Plan Name, Employee Cost, Employer Cost`")
 
     with right_col:
@@ -220,57 +205,70 @@ with run_tab:
         st.markdown("**ROI Assumptions**")
         minutes_per_line = st.slider("Manual mins per line", 0.5, 3.0, 1.2, 0.1, help="Paper review time per employee/plan line")
         hourly_rate = st.slider("Hourly cost ($)", 15, 150, 40, 5)
-        run = st.button("Run Reconciliation", type="primary")
+        c1, c2 = st.columns(2)
+        with c1:
+            run_clicked = st.button("Run Reconciliation", type="primary")
+        with c2:
+            if st.button("Clear All"):
+                # increment uploader version to reset widgets, clear run state
+                st.session_state.upl_ver += 1
+                st.session_state.ran = False
+                st.rerun()
 
-    # Previews & Quick stats
+        if run_clicked:
+            st.session_state.ran = True
+
+    # Previews & Quick stats (hide after a run to declutter)
     p_df = load_any(payroll_file)
     c_df = load_any(carrier_file)
     b_df = load_any(benadmin_file)
 
-    st.markdown("---")
-    pcol, ccol, bcol = st.columns(3)
-    with pcol:
-        st.markdown("#### Payroll Preview")
-        st.dataframe((p_df.head(12) if p_df is not None else pd.DataFrame()), use_container_width=True)
-        quick_stats(p_df, "Payroll")
-    with ccol:
-        st.markdown("#### Carrier Preview")
-        st.dataframe((c_df.head(12) if c_df is not None else pd.DataFrame()), use_container_width=True)
-        quick_stats(c_df, "Carrier")
-    with bcol:
-        st.markdown("#### BenAdmin Preview")
-        st.dataframe((b_df.head(12) if b_df is not None else pd.DataFrame()), use_container_width=True)
-        quick_stats(b_df, "BenAdmin")
+    if not st.session_state.ran:
+        st.markdown("---")
+        pcol, ccol, bcol = st.columns(3)
+        with pcol:
+            st.markdown("#### Payroll Preview")
+            st.dataframe((p_df.head(12) if p_df is not None else pd.DataFrame()), use_container_width=True)
+            quick_stats(p_df, "Payroll")
+        with ccol:
+            st.markdown("#### Carrier Preview")
+            st.dataframe((c_df.head(12) if c_df is not None else pd.DataFrame()), use_container_width=True)
+            quick_stats(c_df, "Carrier")
+        with bcol:
+            st.markdown("#### BenAdmin Preview")
+            st.dataframe((b_df.head(12) if b_df is not None else pd.DataFrame()), use_container_width=True)
+            quick_stats(b_df, "BenAdmin")
 
     st.markdown("---")
     st.subheader("Results")
 
-    if run:
+    if st.session_state.ran:
         try:
             if p_df is not None and c_df is not None and b_df is not None:
                 errors_df, summary_df = reconcile_three(p_df, c_df, b_df, plan_match_threshold=threshold)
-                mode = "Three-way (Payroll vs Carrier vs BenAdmin)"
-                compared_lines = _unique_keys_count(p_df, c_df, b_df)
+                mode = "Three-way (Payroll vs Carrier vs BenAdmin)"; compared_lines = _unique_keys_count(p_df, c_df, b_df)
             elif p_df is not None and c_df is not None:
                 errors_df, summary_df = reconcile_two(p_df, c_df, "Payroll", "Carrier", plan_match_threshold=threshold)
-                mode = "Two-way (Payroll vs Carrier)"
-                compared_lines = _unique_keys_count(p_df, c_df)
+                mode = "Two-way (Payroll vs Carrier)"; compared_lines = _unique_keys_count(p_df, c_df)
             elif p_df is not None and b_df is not None:
                 errors_df, summary_df = reconcile_two(p_df, b_df, "Payroll", "BenAdmin", plan_match_threshold=threshold)
-                mode = "Two-way (Payroll vs BenAdmin)"
-                compared_lines = _unique_keys_count(p_df, b_df)
+                mode = "Two-way (Payroll vs BenAdmin)"; compared_lines = _unique_keys_count(p_df, b_df)
             elif c_df is not None and b_df is not None:
                 errors_df, summary_df = reconcile_two(c_df, b_df, "Carrier", "BenAdmin", plan_match_threshold=threshold)
-                mode = "Two-way (Carrier vs BenAdmin)"
-                compared_lines = _unique_keys_count(c_df, b_df)
+                mode = "Two-way (Carrier vs BenAdmin)"; compared_lines = _unique_keys_count(c_df, b_df)
             else:
-                st.warning("Please upload at least two files to reconcile.")
-                st.stop()
+                st.warning("Please upload at least two files to reconcile."); st.stop()
 
             st.success(f"Completed: {mode}")
 
-            # --- Quick Insights (new) ---
-            render_quick_insights(summary_df, compared_lines, minutes_per_line, hourly_rate)
+            # --- Quick Insights (new, with plan mismatch %) ---
+            render_quick_insights(summary_df, errors_df, compared_lines, minutes_per_line, hourly_rate)
+
+            # --- Error distribution chart (excludes Total) ---
+            if summary_df is not None and not summary_df.empty and "Error Type" in summary_df.columns:
+                dist = summary_df[summary_df["Error Type"].str.lower() != "total"].copy()
+                dist = dist.set_index("Error Type")["Count"].sort_values(ascending=False)
+                st.bar_chart(dist)
 
             # Error chips & tables
             render_error_chips(summary_df)
@@ -295,8 +293,7 @@ with run_tab:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception as e:
-            st.error(f"Error: {e}")
-            st.exception(e)
+            st.error(f"Error: {e}"); st.exception(e)
     else:
         st.info("Upload 2 or 3 files and click **Run Reconciliation**.")
 
