@@ -1,21 +1,23 @@
-import io, os
+# app.py — IvyRecon (Streamlit)
+import os
+import io
+from datetime import datetime
+
 import pandas as pd
 import streamlit as st
-from datetime import datetime
-from excel_export import export_errors_multitab
-from reconcile import reconcile_two, reconcile_three
 import streamlit_authenticator as stauth
 
+from reconcile import reconcile_two, reconcile_three
+from excel_export import export_errors_multitab
+
+# ---------------- Page setup & branding ----------------
 st.set_page_config(page_title="IvyRecon", page_icon="🪄", layout="wide")
 st.markdown('''
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&family=Raleway:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
-:root {
-  --primary: #18CCAA;
-  --navy: #2F455C;
-}
+:root { --primary: #18CCAA; --navy: #2F455C; }
 html, body, [class*="css"]  {
   font-family: "Montserrat", "Raleway", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   color: var(--navy);
@@ -25,21 +27,35 @@ h1, h2, h3, h4 { color: var(--navy); }
 </style>
 ''', unsafe_allow_html=True)
 
+# ---------------- Auth (email + password admin) ----------------
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@example.com")
 ADMIN_NAME = os.environ.get("ADMIN_NAME", "Admin")
-ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "$2b$12$placeholderplaceholderplaceholderplaceholder")
+ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "$2b$12$PLACEHOLDERHASH")
 
+# streamlit-authenticator expects a credentials dict with hashed password
 credentials = {
     "usernames": {
         ADMIN_EMAIL: {
             "email": ADMIN_EMAIL,
             "name": ADMIN_NAME,
-            "password": ADMIN_PASSWORD_HASH,
+            "password": ADMIN_PASSWORD_HASH,  # argon/bcrypt hash string
         }
     }
 }
-authenticator = stauth.Authenticate(credentials, "ivyrecon_cookies", "ivyrecon_key", cookie_expiry_days=1)
-name, auth_status, username = authenticator.login(location="main")
+
+# Create authenticator object (newer API)
+authenticator = stauth.Authenticate(
+    credentials=credentials,
+    cookie_name="ivyrecon_cookies",
+    key="ivyrecon_key",
+    cookie_expiry_days=1,
+)
+
+# Render login UI, then read values from session_state (new API style)
+authenticator.login(location="main")
+auth_status = st.session_state.get("authentication_status")
+name = st.session_state.get("name")
+username = st.session_state.get("username")
 
 if auth_status is False:
     st.error("Invalid credentials")
@@ -48,15 +64,16 @@ elif auth_status is None:
     st.info("Enter your email and password to continue.")
     st.stop()
 
+# Authenticated — show sidebar + logout
 with st.sidebar:
-    st.write(f"**Signed in as:** {name}")
-    if st.button("Logout"):
-        authenticator.logout(location="sidebar")
-        st.stop()
+    st.write(f"**Signed in as:** {name or username}")
+    authenticator.logout(location="sidebar")
 
+# ---------------- App UI ----------------
 st.title("IvyRecon")
 st.caption("Payroll ↔ Carrier ↔ BenAdmin reconciliation — clean, fast, and accurate.")
 
+# Uploads (in-memory only; no disk writes)
 cols = st.columns(3)
 with cols[0]:
     payroll_file = st.file_uploader("Payroll (CSV/XLSX)", type=["csv", "xlsx"], key="payroll")
@@ -67,17 +84,17 @@ with cols[2]:
 
 st.markdown("**Required Columns:** `SSN, First Name, Last Name, Plan Name, Employee Cost, Employer Cost`")
 
-c1, c2, c3, c4 = st.columns([1,1,1,1])
-with c1:
+ctl1, ctl2, ctl3, ctl4 = st.columns([1,1,1,1])
+with ctl1:
     threshold = st.slider("Plan Name Match Threshold", 0.5, 1.0, 0.90, 0.01)
-with c2:
+with ctl2:
     group_name = st.text_input("Group Name (for export header)", value="")
-with c3:
+with ctl3:
     period = st.text_input("Reporting Period", value="")
-with c4:
+with ctl4:
     run = st.button("Run Reconciliation", type="primary")
 
-def load_any(file):
+def load_any(file) -> pd.DataFrame | None:
     if not file:
         return None
     try:
@@ -88,13 +105,14 @@ def load_any(file):
         st.error(f"Failed to read {file.name}: {e}")
         return None
 
-def quick_stats(df, label):
+def quick_stats(df: pd.DataFrame, label: str):
     if df is None: return
     c1, c2, c3 = st.columns(3)
     with c1: st.metric(f"{label} Rows", len(df))
     with c2: st.metric(f"{label} Unique Employees", df['SSN'].astype(str).nunique() if 'SSN' in df.columns else 0)
     with c3: st.metric(f"{label} Plans", df['Plan Name'].astype(str).nunique() if 'Plan Name' in df.columns else 0)
 
+# Previews
 p_df = load_any(payroll_file)
 c_df = load_any(carrier_file)
 b_df = load_any(benadmin_file)
@@ -156,4 +174,5 @@ if run:
         st.exception(e)
 else:
     st.info("Upload 2 or 3 files and click **Run Reconciliation**.")
+
 
