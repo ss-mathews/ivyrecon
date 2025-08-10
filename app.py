@@ -264,29 +264,6 @@ with run_tab:
             # --- Quick Insights (new, with plan mismatch %) ---
             render_quick_insights(summary_df, errors_df, compared_lines, minutes_per_line, hourly_rate)
 
-           # --- Error distribution chart (compact, centered, Top-N) ---
-            if summary_df is not None and not summary_df.empty and "Error Type" in summary_df.columns:
-                dist = summary_df[summary_df["Error Type"].str.lower() != "total"].copy()
-                dist = dist.sort_values("Count", ascending=False)
-                top_n = st.slider("Show top error types", 3, 10, min(5, len(dist)), 1)
-                trimmed = dist.head(top_n)
-
-                import altair as alt
-                chart = (
-                    alt.Chart(trimmed.rename(columns={"Error Type": "Error"}))
-                    .mark_bar()
-                    .encode(
-                        x=alt.X("Count:Q", title="Count"),
-                        y=alt.Y("Error:N", sort="-x", title=None),
-                        tooltip=["Error:N", "Count:Q"]
-                    )
-                    .properties(width=850, height=66 * len(trimmed))
-                )
-
-                mid = st.columns([1, 2, 1])[1]   # center the chart on the page
-                with mid:
-                    st.altair_chart(chart, use_container_width=False)
-
             # Error chips & tables
             render_error_chips(summary_df)
 
