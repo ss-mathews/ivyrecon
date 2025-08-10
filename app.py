@@ -280,7 +280,7 @@ with run_tab:
                         y=alt.Y("Error:N", sort="-x", title=None),
                         tooltip=["Error:N", "Count:Q"]
                     )
-                    .properties(width=520, height=28 * len(trimmed))
+                    .properties(width=850, height=66 * len(trimmed))
                 )
 
                 mid = st.columns([1, 2, 1])[1]   # center the chart on the page
