@@ -145,6 +145,52 @@ def render_error_chips(summary_df: pd.DataFrame):
         chips.append(f'<div class="chip"><b>Total:</b> {total}</div>')
     st.markdown(" ".join(chips), unsafe_allow_html=True)
 
+    # Compute an approximate unique lines-compared count based on SSN+Plan keys across uploads
+def _unique_keys_count(*dfs: pd.DataFrame) -> int:
+    keys = set()
+    for df in dfs:
+        if df is None or df.empty:
+            continue
+        cols = {c.lower(): c for c in df.columns}
+        ssn_col = cols.get("ssn")
+        plan_col = cols.get("plan name") or cols.get("plan")
+        if ssn_col and plan_col:
+            ssn_series = df[ssn_col].astype(str).str.replace(r"\D", "", regex=True)
+            plan_series = df[plan_col].astype(str).str.strip().str.lower()
+            for ssn, plan in zip(ssn_series, plan_series):
+                keys.add(f"{ssn}||{plan}")
+        else:
+            # fallback so we don't get zero if headers are odd
+            keys.update([f"row-{i}-df-{id(df)}" for i in range(len(df))])
+    return len(keys)
+
+# Quick insights block shown after Run
+def render_quick_insights(summary_df: pd.DataFrame, compared_lines: int, minutes_per_line: float, hourly_rate: float):
+    total_errors = 0
+    most_common = "—"
+    if summary_df is not None and not summary_df.empty:
+        # total errors (from Summary's 'Total' row)
+        for _, r in summary_df.iterrows():
+            if str(r["Error Type"]).lower() == "total":
+                total_errors = int(r["Count"]); break
+        # most common error (excluding Total)
+        filt = summary_df[summary_df["Error Type"].str.lower() != "total"] if "Error Type" in summary_df.columns else summary_df
+        if not filt.empty:
+            top = filt.sort_values("Count", ascending=False).iloc[0]
+            most_common = f"{top['Error Type']} ({int(top['Count'])})"
+
+    error_rate = (total_errors / compared_lines) if compared_lines else 0.0
+    minutes_saved = compared_lines * minutes_per_line
+    hours_saved = minutes_saved / 60.0
+    dollars_saved = hours_saved * hourly_rate
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1: st.metric("Lines Reconciled", f"{compared_lines:,}")
+    with m2: st.metric("Error Rate", f"{error_rate:.1%}", help="Total errors / lines compared")
+    with m3: st.metric("Most Common Error", most_common)
+    with m4: st.metric("Time Saved (hrs)", f"{hours_saved:,.1f}")
+    st.caption(f"Estimated savings at ${hourly_rate:,.0f}/hr and {minutes_per_line:.1f} min/line ≈ **${dollars_saved:,.0f}**.")
+
 # ---------------- Tabs ----------------
 st.title("IvyRecon")
 st.caption("Modern, tech-forward reconciliation for Payroll • Carrier • BenAdmin")
@@ -152,26 +198,28 @@ st.caption("Modern, tech-forward reconciliation for Payroll • Carrier • BenA
 run_tab, dashboard_tab, help_tab = st.tabs(["Run Reconciliation", "Summary Dashboard", "Help & Formatting"])
 
 with run_tab:
-    # Upload + Controls
-    st.subheader("Upload Files")
-    up1, up2, up3 = st.columns(3)
-    with up1:
-        payroll_file = st.file_uploader("Payroll (CSV/XLSX)", type=["csv", "xlsx"], key="payroll")
-    with up2:
-        carrier_file = st.file_uploader("Carrier (CSV/XLSX)", type=["csv", "xlsx"], key="carrier")
-    with up3:
-        benadmin_file = st.file_uploader("BenAdmin (CSV/XLSX)", type=["csv", "xlsx"], key="benadmin")
+    # Clean two-column layout: uploads left, controls right
+    left_col, right_col = st.columns([2, 1])
 
-    st.markdown("**Required Columns:** `SSN, First Name, Last Name, Plan Name, Employee Cost, Employer Cost`")
+    with left_col:
+        st.subheader("Upload Files")
+        up1, up2, up3 = st.columns(3)
+        with up1:
+            payroll_file = st.file_uploader("Payroll (CSV/XLSX)", type=["csv", "xlsx"], key="payroll")
+        with up2:
+            carrier_file = st.file_uploader("Carrier (CSV/XLSX)", type=["csv", "xlsx"], key="carrier")
+        with up3:
+            benadmin_file = st.file_uploader("BenAdmin (CSV/XLSX)", type=["csv", "xlsx"], key="benadmin")
+        st.markdown("**Required Columns:** `SSN, First Name, Last Name, Plan Name, Employee Cost, Employer Cost`")
 
-    ctl1, ctl2, ctl3, ctl4 = st.columns([1,1,1,1])
-    with ctl1:
+    with right_col:
+        st.subheader("Options")
         threshold = st.slider("Plan Name Match Threshold", 0.5, 1.0, 0.90, 0.01, help="Lower = more tolerant fuzzy matches")
-    with ctl2:
-        group_name = st.text_input("Group Name (for export header)", value="")
-    with ctl3:
+        group_name = st.text_input("Group Name (export header)", value="")
         period = st.text_input("Reporting Period", value="")
-    with ctl4:
+        st.markdown("**ROI Assumptions**")
+        minutes_per_line = st.slider("Manual mins per line", 0.5, 3.0, 1.2, 0.1, help="Paper review time per employee/plan line")
+        hourly_rate = st.slider("Hourly cost ($)", 15, 150, 40, 5)
         run = st.button("Run Reconciliation", type="primary")
 
     # Previews & Quick stats
@@ -179,18 +227,19 @@ with run_tab:
     c_df = load_any(carrier_file)
     b_df = load_any(benadmin_file)
 
+    st.markdown("---")
     pcol, ccol, bcol = st.columns(3)
     with pcol:
         st.markdown("#### Payroll Preview")
-        st.dataframe((p_df.head(15) if p_df is not None else pd.DataFrame()), use_container_width=True)
+        st.dataframe((p_df.head(12) if p_df is not None else pd.DataFrame()), use_container_width=True)
         quick_stats(p_df, "Payroll")
     with ccol:
         st.markdown("#### Carrier Preview")
-        st.dataframe((c_df.head(15) if c_df is not None else pd.DataFrame()), use_container_width=True)
+        st.dataframe((c_df.head(12) if c_df is not None else pd.DataFrame()), use_container_width=True)
         quick_stats(c_df, "Carrier")
     with bcol:
         st.markdown("#### BenAdmin Preview")
-        st.dataframe((b_df.head(15) if b_df is not None else pd.DataFrame()), use_container_width=True)
+        st.dataframe((b_df.head(12) if b_df is not None else pd.DataFrame()), use_container_width=True)
         quick_stats(b_df, "BenAdmin")
 
     st.markdown("---")
@@ -201,22 +250,29 @@ with run_tab:
             if p_df is not None and c_df is not None and b_df is not None:
                 errors_df, summary_df = reconcile_three(p_df, c_df, b_df, plan_match_threshold=threshold)
                 mode = "Three-way (Payroll vs Carrier vs BenAdmin)"
+                compared_lines = _unique_keys_count(p_df, c_df, b_df)
             elif p_df is not None and c_df is not None:
                 errors_df, summary_df = reconcile_two(p_df, c_df, "Payroll", "Carrier", plan_match_threshold=threshold)
                 mode = "Two-way (Payroll vs Carrier)"
+                compared_lines = _unique_keys_count(p_df, c_df)
             elif p_df is not None and b_df is not None:
                 errors_df, summary_df = reconcile_two(p_df, b_df, "Payroll", "BenAdmin", plan_match_threshold=threshold)
                 mode = "Two-way (Payroll vs BenAdmin)"
+                compared_lines = _unique_keys_count(p_df, b_df)
             elif c_df is not None and b_df is not None:
                 errors_df, summary_df = reconcile_two(c_df, b_df, "Carrier", "BenAdmin", plan_match_threshold=threshold)
                 mode = "Two-way (Carrier vs BenAdmin)"
+                compared_lines = _unique_keys_count(c_df, b_df)
             else:
                 st.warning("Please upload at least two files to reconcile.")
                 st.stop()
 
             st.success(f"Completed: {mode}")
 
-            # Error chips
+            # --- Quick Insights (new) ---
+            render_quick_insights(summary_df, compared_lines, minutes_per_line, hourly_rate)
+
+            # Error chips & tables
             render_error_chips(summary_df)
 
             left, right = st.columns([1, 2])
@@ -226,7 +282,7 @@ with run_tab:
             with right:
                 st.markdown("**Errors**")
                 if errors_df is not None and not errors_df.empty:
-                    st.dataframe(style_errors(errors_df), use_container_width=True, height=480)
+                    st.dataframe(style_errors(errors_df), use_container_width=True, height=520)
                 else:
                     st.info("No errors found.")
 
