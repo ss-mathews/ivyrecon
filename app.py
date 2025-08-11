@@ -265,6 +265,80 @@ def _unique_keys_count(*dfs: pd.DataFrame) -> int:
             keys.update([f"row-{i}-df-{id(df)}" for i in range(len(df))])
     return len(keys)
 
+def _to_float_or_none(v):
+    try:
+        if pd.isna(v): 
+            return None
+        s = str(v).strip()
+        if s == "": 
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+def _money_eq(a, b, tolerance_cents: int, blank_is_zero: bool) -> bool:
+    A = _to_float_or_none(a)
+    B = _to_float_or_none(b)
+    if A is None and B is None:
+        return True
+    if blank_is_zero:
+        A = 0.0 if A is None else A
+        B = 0.0 if B is None else B
+    if A is None or B is None:
+        return False
+    tol = max(0, int(tolerance_cents)) / 100.0
+    return abs(A - B) <= tol
+
+def _columns_for_amount(row, base_name: str):
+    """
+    errors_df may label sides variously, e.g.:
+      'Employer Cost (Payroll)', 'Employer Cost (BenAdmin)'
+    Return two values if found; else (None, None).
+    """
+    vals = []
+    for c in row.index:
+        lc = c.lower()
+        if base_name.lower() in lc and "(" in lc and ")" in lc:
+            vals.append(row[c])
+    if len(vals) >= 2:
+        return vals[0], vals[1]
+    return None, None
+
+def postfilter_amount_mismatches(errors_df: pd.DataFrame, summary_df: pd.DataFrame,
+                                 tolerance_cents: int, blank_is_zero: bool):
+    if errors_df is None or errors_df.empty:
+        return errors_df, summary_df, 0
+    keep = []
+    removed = 0
+    for idx, row in errors_df.iterrows():
+        et = str(row.get("Error Type", "")).lower()
+        if "employer cost mismatch" in et:
+            a, b = _columns_for_amount(row, "employer cost")
+            if _money_eq(a, b, tolerance_cents, blank_is_zero):
+                removed += 1
+                continue
+        if "employee cost mismatch" in et:
+            a, b = _columns_for_amount(row, "employee cost")
+            if _money_eq(a, b, tolerance_cents, blank_is_zero):
+                removed += 1
+                continue
+        keep.append(idx)
+    filtered = errors_df.loc[keep].reset_index(drop=True)
+    # rebuild summary from filtered
+    if summary_df is not None and not summary_df.empty and "Error Type" in summary_df.columns:
+        new_summary = (
+            filtered.groupby("Error Type", dropna=False)
+                    .size().reset_index(name="Count")
+            if not filtered.empty else pd.DataFrame({"Error Type": ["Total"], "Count": [0]})
+        )
+        if not filtered.empty:
+            total = pd.DataFrame({"Error Type": ["Total"], "Count": [int(new_summary["Count"].sum())]})
+            new_summary = pd.concat([new_summary, total], ignore_index=True)
+    else:
+        new_summary = summary_df
+    return filtered, new_summary, removed
+
+
 def compute_insights(summary_df: pd.DataFrame, errors_df: pd.DataFrame, compared_lines: int, minutes_per_line: float, hourly_rate: float):
     total_errors = 0; most_common = "—"; mismatch_pct = 0.0
     if summary_df is not None and not summary_df.empty:
@@ -600,6 +674,14 @@ with run_tab:
                 st.stop()
 
             st.success(f"Completed: {mode}")
+
+            # After st.success(f"Completed: {mode}") and before rendering results:
+            errors_df, summary_df, removed_eq = postfilter_amount_mismatches(
+                errors_df, summary_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero
+            )
+            if removed_eq:
+                st.caption(f"Ignored {removed_eq} amount mismatches as equivalent (blank↔$0 within {amount_tolerance_cents}¢).")
+
 
             with st.expander("🔎 Debug Investigator: check an employee/plan across files"):
                 q_ssn = st.text_input("Enter SSN (9 digits or last 4 ok)")
