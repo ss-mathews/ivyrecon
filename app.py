@@ -604,32 +604,64 @@ with run_tab:
 
     if st.session_state.ran:
         try:
-            # Apply aliases normalization to plan names before reconcile
-            aliases = st.session_state["aliases"]
-            for df in (p_df, c_df, b_df):
-                if df is not None and not df.empty and "Plan Name" in df.columns:
-                    apply_aliases_to_df(df, "Plan Name", aliases, threshold=threshold)
+            # 1) STANDARDIZE (make sure you have standardize_df() defined above)
+            p_df = standardize_df(p_df)
+            c_df = standardize_df(c_df)
+            b_df = standardize_df(b_df)
 
+            # 2) STRIP CARRIER PREFIXES (optional helper; safe to skip if you didn’t add it)
+            def strip_carrier_prefixes(df):
+                if df is None or df.empty or "Plan Name" not in df.columns:
+                    return df
+                CARRIER_TOKENS = {"sun", "life", "metlife", "voya", "unum", "guardian", "lincoln", "principal", "anthem"}
+                def _strip(p):
+                    s = str(p).strip().lower()
+                    parts = [t for t in s.split() if t not in CARRIER_TOKENS]
+                    return " ".join(parts)
+                out = df.copy()
+                out["Plan Name"] = out["Plan Name"].astype(str).apply(_strip)
+                return out
+
+            p_df = strip_carrier_prefixes(p_df)
+            c_df = strip_carrier_prefixes(c_df)
+            b_df = strip_carrier_prefixes(b_df)
+
+            # 3) APPLY ALIASES (ASSIGN the returned DataFrames!)
+            aliases = st.session_state["aliases"]
+            p_df = apply_aliases_to_df(p_df, "Plan Name", aliases, threshold=threshold) if p_df is not None else None
+            c_df = apply_aliases_to_df(c_df, "Plan Name", aliases, threshold=threshold) if c_df is not None else None
+            b_df = apply_aliases_to_df(b_df, "Plan Name", aliases, threshold=threshold) if b_df is not None else None
+
+            # (optional tiny stat to confirm canon consolidation)
+            def _canon_stats(df, label):
+                if df is not None and "Plan Name" in df.columns:
+                    st.caption(f"{label}: {df['Plan Name'].nunique()} canonical plan names after aliases")
+            _canon_stats(p_df, "Payroll"); _canon_stats(c_df, "Carrier"); _canon_stats(b_df, "BenAdmin")
+
+            # 4) NORMALIZE AMOUNTS (blank/'-' → 0, snap to cents, apply tolerance slider)
             def _normalize_amounts(df: pd.DataFrame):
                 if df is None or df.empty:
                     return df
+                out = df.copy()
                 for col in ["Employee Cost", "Employer Cost"]:
-                    if col in df.columns:
-                        if treat_blank_as_zero:  # from the UI checkbox
-                            df[col] = df[col].fillna(0.0)
-                        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-                        # snap to cents and apply tolerance
-                        df[col] = (df[col] * 100).round() / 100.0
+                    if col in out.columns:
+                        # blanks & '-' to zero if enabled
+                        if treat_blank_as_zero:
+                            out[col] = out[col].replace(["", "-", "--"], 0).fillna(0)
+                        # numeric conversion, then tolerance
+                        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0 if treat_blank_as_zero else 0)
+                        out[col] = (out[col] * 100).round() / 100.0  # standard cents
+                        step = max(1, amount_tolerance_cents)
                         if amount_tolerance_cents > 0:
-                            step = max(1, amount_tolerance_cents)
-                            df[col] = ((df[col] * 100 / step).round() * step / 100.0)
-                        df[col] = df[col].round(2)
-                return df
+                            out[col] = ((out[col] * 100 / step).round() * step / 100.0)
+                        out[col] = out[col].round(2)
+                return out
 
             p_df = _normalize_amounts(p_df)
             c_df = _normalize_amounts(c_df)
-            b_df = _normalize_amounts(b_df)        
+            b_df = _normalize_amounts(b_df)
 
+            # 5) DUPLICATE HANDLING (requires dedupe_exact / aggregate_duplicates defined above)
             dup_notes = []
 
             def _apply_dup_mode(df, label):
@@ -637,43 +669,19 @@ with run_tab:
                     return df
                 if dup_mode == "Ignore exact duplicates (recommended)":
                     new_df, removed = dedupe_exact(df)
-                    if removed:
-                        dup_notes.append(f"{label}: removed {removed} exact duplicate row(s)")
+                    if removed: dup_notes.append(f"{label}: removed {removed} exact duplicate row(s)")
                     return new_df
                 elif dup_mode == "Aggregate duplicates (sum amounts)":
                     new_df, removed = aggregate_duplicates(df)
-                    if removed:
-                        dup_notes.append(f"{label}: aggregated {removed} row(s) into keys")
+                    if removed: dup_notes.append(f"{label}: aggregated {removed} row(s) into keys")
                     return new_df
-                # Keep all (strict)
-                return df
+                return df  # Keep all (strict)
 
             p_df = _apply_dup_mode(p_df, "Payroll")
             c_df = _apply_dup_mode(c_df, "Carrier")
-            b_df = _apply_dup_mode(b_df, "BenAdmin") 
+            b_df = _apply_dup_mode(b_df, "BenAdmin")
 
-            def normalize_cost_columns(df):
-                if df is None or df.empty:
-                    return df
-                for col in ["Employee Cost", "Employer Cost"]:
-                    if col in df.columns:
-                        # Replace dashes and blanks with 0, then convert to float
-                        df[col] = (
-                            df[col]
-                            .replace("-", 0)
-                            .replace("", 0)
-                            .fillna(0)
-                            .apply(lambda x: 0 if str(x).strip() in ["-", ""] else x)
-                        )
-                        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-                return df
-
-            # Apply normalization to all input DataFrames
-            p_df = normalize_cost_columns(p_df)
-            c_df = normalize_cost_columns(c_df)
-            b_df = normalize_cost_columns(b_df)
-       
-
+            # 6) RECONCILE
             if p_df is not None and c_df is not None and b_df is not None:
                 errors_df, summary_df = reconcile_three(p_df, c_df, b_df, plan_match_threshold=threshold)
                 mode = "Three-way (Payroll vs Carrier vs BenAdmin)"
