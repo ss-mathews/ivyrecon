@@ -1,4 +1,4 @@
-# app.py — IvyRecon (Smart Reconciliation: sales-friendly)
+# app.py — IvyRecon (Smart Reconciliation + Frequency-Aware Totals + Stronger Aliasing)
 import os, json
 from datetime import datetime
 
@@ -7,7 +7,7 @@ import streamlit as st
 import streamlit_authenticator as stauth
 import streamlit.components.v1 as components
 
-from reconcile import reconcile_two, reconcile_three  # existing row-level engine
+from reconcile import reconcile_two, reconcile_three  # row-level (used for drilldown only)
 from excel_export import export_errors_multitab
 from aliases import (
     DEFAULT_ALIASES, load_aliases_from_secrets, normalize_alias_dict,
@@ -45,7 +45,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------------- Auth (email + password admin) ----------------
+# ---------------- Auth ----------------
 ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL") or os.environ.get("ADMIN_EMAIL", "admin@example.com")
 ADMIN_NAME = st.secrets.get("ADMIN_NAME") or os.environ.get("ADMIN_NAME", "Admin")
 ADMIN_PASSWORD_HASH = st.secrets.get("ADMIN_PASSWORD_HASH") or os.environ.get("ADMIN_PASSWORD_HASH", "$2b$12$PLACEHOLDER")
@@ -79,11 +79,33 @@ with st.sidebar:
     st.caption("IvyRecon • Clean reconciliation for Payroll ↔ Carrier ↔ BenAdmin")
 
 # ---------------- State & defaults ----------------
-if "upl_ver" not in st.session_state: st.session_state["upl_ver"] = 0
-if "ran" not in st.session_state: st.session_state["ran"] = False
 if "aliases" not in st.session_state:
     from_secrets = load_aliases_from_secrets(st)
-    st.session_state["aliases"] = merge_aliases(DEFAULT_ALIASES, normalize_alias_dict(from_secrets))
+
+    # strengthen defaults for STD/LTD/AD&D/voluntary/etc.
+    STRONG_DEFAULTS = {
+        "short term disability": [
+            "std","voluntary short term disability","short-term disability","short term dis","std voluntary","voluntary std"
+        ],
+        "long term disability": [
+            "ltd","voluntary long term disability","long-term disability","long term dis","ltd voluntary","voluntary ltd"
+        ],
+        "ad&d": [
+            "add","accidental death and dismemberment","voluntary ad&d","voluntary add","vol add","voluntary"
+        ],
+        "accident": ["accident plan","accident insurance","acc","voluntary accident"],
+        "hospital indemnity": ["hospital indemnity plan","hospital","hi","voluntary hospital indemnity","hospital plan"],
+        "critical illness": ["critical illness plan","critical","ci","voluntary critical illness"],
+        "medical": ["health","med","medical plan","health plan"],
+        "dental": ["dent","dntl","dental plan"],
+        "vision": ["vis","vision plan","vba"],
+        "life": ["basic life","group life","life insurance","voluntary life","vol life","employee life","emp life"]
+    }
+
+    st.session_state["aliases"] = merge_aliases(
+        merge_aliases(DEFAULT_ALIASES, STRONG_DEFAULTS),
+        normalize_alias_dict(from_secrets)
+    )
 
 REQUIRED = ["SSN","First Name","Last Name","Plan Name","Employee Cost","Employer Cost"]
 
@@ -102,7 +124,6 @@ def style_errors(df: pd.DataFrame):
         et = str(row.get("Error Type", ""))
         if et.startswith("Missing in"): return ["background-color: #FFFBEB"] * len(row)
         if "Mismatch" in et:            return ["background-color: #FFF5F5"] * len(row)
-        if "Duplicate SSN" in et:       return ["background-color: #EFF6FF"] * len(row)
         return [""] * len(row)
     return df.style.apply(_row_style, axis=1)
 
@@ -120,9 +141,7 @@ def render_error_chips(summary_df: pd.DataFrame):
     for _, r in summary_df.iterrows():
         et, cnt = str(r["Error Type"]), int(r["Count"])
         if et.lower() == "total": total = cnt; continue
-        color = "blue"
-        if et.startswith("Missing in"): color = "yellow"
-        elif "Mismatch" in et: color = "red"
+        color = "yellow" if et.startswith("Missing in") else ("red" if "Mismatch" in et else "blue")
         chips.append(f'<div class="chip {color}"><b>{cnt}</b> {et}</div>')
     if total: chips.append(f'<div class="chip"><b>Total:</b> {total}</div>')
     st.markdown(" ".join(chips), unsafe_allow_html=True)
@@ -208,11 +227,26 @@ def aggregate_by_key_distinct(df: pd.DataFrame) -> pd.DataFrame:
         if k in cols: agg[k] = "first"
     return out.groupby(req, dropna=False, as_index=False).agg(agg).reset_index(drop=True)
 
-# Totals engines (noise-tolerant)
-def _tol_ok(a,b,cents:int)->bool:
+# ---------- Frequency-aware totals engine ----------
+FREQUENCY_FACTORS = [2, 4, 12, 24, 26, 52]  # semi-monthly, weekly-ish, monthly, semi-monthly, bi-weekly, weekly
+
+def _tol_ok(a, b, cents:int)->bool:
     try: aa = 0.0 if pd.isna(a) else float(a); bb = 0.0 if pd.isna(b) else float(b)
     except: return False
-    return abs(aa-bb) <= max(0,int(cents))/100.0
+    return abs(aa - bb) <= max(0,int(cents))/100.0
+
+def _freq_ok(a, b, cents:int):
+    """Return (True, factor_used) if a≈b or a≈b*factor or b≈a*factor within tolerance."""
+    if _tol_ok(a,b,cents): return True, 1
+    try:
+        aa = 0.0 if pd.isna(a) else float(a)
+        bb = 0.0 if pd.isna(b) else float(b)
+    except:
+        return False, None
+    for f in FREQUENCY_FACTORS:
+        if _tol_ok(aa, bb*f, cents): return True, f
+        if _tol_ok(bb, aa*f, cents): return True, f
+    return False, None
 
 def totals_by_key(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -225,7 +259,7 @@ def totals_by_key(df: pd.DataFrame) -> pd.DataFrame:
 def reconcile_totals_two(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: str, cents: int):
     A, B = totals_by_key(a), totals_by_key(b)
     merged = pd.merge(A, B, on=["SSN","Plan Name"], how="outer", suffixes=(f" ({a_name})", f" ({b_name})"))
-    errors = []
+    errors = []; freq_resolved = 0
     for _, r in merged.iterrows():
         in_a = pd.notna(r.get(f"Employee Cost ({a_name})")) or pd.notna(r.get(f"Employer Cost ({a_name})"))
         in_b = pd.notna(r.get(f"Employee Cost ({b_name})")) or pd.notna(r.get(f"Employer Cost ({b_name})"))
@@ -235,16 +269,30 @@ def reconcile_totals_two(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: 
         if in_b and not in_a:
             errors.append({"Error Type": f"Missing in {a_name}","SSN": r["SSN"],"First Name": r.get(f"First Name ({a_name})") or r.get(f"First Name ({b_name})"),
                            "Last Name": r.get(f"Last Name ({a_name})") or r.get(f"Last Name ({b_name})"),"Plan Name": r["Plan Name"]}); continue
+        # both present -> compare Employee & Employer with frequency logic
         ee_a, ee_b = r.get(f"Employee Cost ({a_name})",0.0), r.get(f"Employee Cost ({b_name})",0.0)
         er_a, er_b = r.get(f"Employer Cost ({a_name})",0.0), r.get(f"Employer Cost ({b_name})",0.0)
-        if not _tol_ok(ee_a, ee_b, cents):
-            errors.append({"Error Type":"Employee Amount Mismatch","SSN": r["SSN"],"First Name": r.get(f"First Name ({a_name})") or r.get(f"First Name ({b_name})"),
-                           "Last Name": r.get(f"Last Name ({a_name})") or r.get(f"Last Name ({b_name})"),"Plan Name": r["Plan Name"],
-                           f"Employee Cost ({a_name})": ee_a, f"Employee Cost ({b_name})": ee_b})
-        if not _tol_ok(er_a, er_b, cents):
-            errors.append({"Error Type":"Employer Amount Mismatch","SSN": r["SSN"],"First Name": r.get(f"First Name ({a_name})") or r.get(f"First Name ({b_name})"),
-                           "Last Name": r.get(f"Last Name ({a_name})") or r.get(f"Last Name ({b_name})"),"Plan Name": r["Plan Name"],
-                           f"Employer Cost ({a_name})": er_a, f"Employer Cost ({b_name})": er_b})
+
+        ok_ee, f_ee = _freq_ok(ee_a, ee_b, cents)
+        ok_er, f_er = _freq_ok(er_a, er_b, cents)
+
+        if ok_ee and ok_er:
+            if (f_ee and f_ee != 1) or (f_er and f_er != 1): freq_resolved += 1
+            continue  # treat as match (possibly frequency-resolved)
+
+        if not ok_ee:
+            errors.append({
+                "Error Type":"Employee Amount Mismatch","SSN": r["SSN"],"First Name": r.get(f"First Name ({a_name})") or r.get(f"First Name ({b_name})"),
+                "Last Name": r.get(f"Last Name ({a_name})") or r.get(f"Last Name ({b_name})"),"Plan Name": r["Plan Name"],
+                f"Employee Cost ({a_name})": ee_a, f"Employee Cost ({b_name})": ee_b
+            })
+        if not ok_er:
+            errors.append({
+                "Error Type":"Employer Amount Mismatch","SSN": r["SSN"],"First Name": r.get(f"First Name ({a_name})") or r.get(f"First Name ({b_name})"),
+                "Last Name": r.get(f"Last Name ({a_name})") or r.get(f"Last Name ({b_name})"),"Plan Name": r["Plan Name"],
+                f"Employer Cost ({a_name})": er_a, f"Employer Cost ({b_name})": er_b
+            })
+
     errors_df = pd.DataFrame(errors)
     if errors_df.empty:
         summary_df = pd.DataFrame({"Error Type":["Total"],"Count":[0]})
@@ -252,13 +300,14 @@ def reconcile_totals_two(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: 
         summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
         summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
     compared = len(merged)
-    return errors_df, summary_df, compared
+    return errors_df, summary_df, compared, freq_resolved
 
 def reconcile_totals_three(p: pd.DataFrame, c: pd.DataFrame, b: pd.DataFrame, cents: int):
-    parts = []
+    parts = []; resolved = 0
     for (x, xn), (y, yn) in [((p,"Payroll"),(c,"Carrier")), ((p,"Payroll"),(b,"BenAdmin")), ((c,"Carrier"),(b,"BenAdmin"))]:
-        e, s, comp = reconcile_totals_two(x, y, xn, yn, cents)
+        e, _, _, r = reconcile_totals_two(x, y, xn, yn, cents)
         if not e.empty: parts.append(e)
+        resolved += r
     errors_df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["Error Type"])
     if errors_df.empty:
         summary_df = pd.DataFrame({"Error Type":["Total"],"Count":[0]})
@@ -266,7 +315,7 @@ def reconcile_totals_three(p: pd.DataFrame, c: pd.DataFrame, b: pd.DataFrame, ce
         summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
         summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
     compared = 0
-    return errors_df, summary_df, compared
+    return errors_df, summary_df, compared, resolved
 
 # Drilldown: run row-level only for mismatched SSN+Plan keys
 def drilldown_row_level_for_keys(p_df, c_df, b_df, keys, threshold):
@@ -275,21 +324,13 @@ def drilldown_row_level_for_keys(p_df, c_df, b_df, keys, threshold):
         if df is None or df.empty: return df
         return df[df.apply(lambda r: (str(r.get("SSN")), str(r.get("Plan Name"))) in keys, axis=1)]
     p2, c2, b2 = _filter(p_df), _filter(c_df), _filter(b_df)
-    # choose correct two/three reconcile
-    if p2 is not None and c2 is not None and b2 is not None and not p2.empty and not c2.empty and not b2.empty:
-        e, _ = reconcile_three(p2, c2, b2, plan_match_threshold=threshold)
-        return e
-    # else try pairs prioritizing payroll
     parts = []
     if p2 is not None and c2 is not None and not p2.empty and not c2.empty:
-        e, _ = reconcile_two(p2, c2, "Payroll", "Carrier", plan_match_threshold=threshold)
-        parts.append(e)
+        e, _ = reconcile_two(p2, c2, "Payroll", "Carrier", plan_match_threshold=threshold); parts.append(e)
     if p2 is not None and b2 is not None and not p2.empty and not b2.empty:
-        e, _ = reconcile_two(p2, b2, "Payroll", "BenAdmin", plan_match_threshold=threshold)
-        parts.append(e)
+        e, _ = reconcile_two(p2, b2, "Payroll", "BenAdmin", plan_match_threshold=threshold); parts.append(e)
     if c2 is not None and b2 is not None and not c2.empty and not b2.empty:
-        e, _ = reconcile_two(c2, b2, "Carrier", "BenAdmin", plan_match_threshold=threshold)
-        parts.append(e)
+        e, _ = reconcile_two(c2, b2, "Carrier", "BenAdmin", plan_match_threshold=threshold); parts.append(e)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 # Insights
@@ -398,9 +439,9 @@ with run_tab:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("### Upload Files")
         u1,u2,u3 = st.columns(3)
-        with u1: payroll_file  = st.file_uploader("Payroll (CSV/XLSX)",  type=["csv","xlsx"], key=f"pay_{st.session_state.upl_ver}")
-        with u2: carrier_file  = st.file_uploader("Carrier (CSV/XLSX)",  type=["csv","xlsx"], key=f"car_{st.session_state.upl_ver}")
-        with u3: benadmin_file = st.file_uploader("BenAdmin (CSV/XLSX)", type=["csv","xlsx"], key=f"ben_{st.session_state.upl_ver}")
+        with u1: payroll_file  = st.file_uploader("Payroll (CSV/XLSX)",  type=["csv","xlsx"])
+        with u2: carrier_file  = st.file_uploader("Carrier (CSV/XLSX)",  type=["csv","xlsx"])
+        with u3: benadmin_file = st.file_uploader("BenAdmin (CSV/XLSX)", type=["csv","xlsx"])
         st.caption("Required Columns: SSN, First Name, Last Name, Plan Name, Employee Cost, Employer Cost")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -409,7 +450,7 @@ with run_tab:
         st.markdown("### Details")
         group_name = st.text_input("Group Name", value="")
         period     = st.text_input("Reporting Period", value="")
-        run_clicked = st.button("Run Reconciliation", type="primary", use_container_width=True)
+        # keep “Advanced” minimal; sensible defaults
         with st.expander("Advanced (optional)"):
             st.caption("Defaults are battle-tested. Tweak only if needed.")
             threshold = st.slider("Plan Name Match Threshold", 0.5, 1.0, 0.90, 0.01)
@@ -417,6 +458,7 @@ with run_tab:
             amount_tolerance_cents = st.slider("Amount tolerance (cents)", 0, 25, 2, 1)
             minutes_per_line = st.slider("Manual mins per line (for ROI)", 0.5, 3.0, 1.2, 0.1)
             hourly_rate = st.slider("Hourly cost ($)", 15, 150, 40, 5)
+        run_clicked = st.button("Run Reconciliation", type="primary", use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
     # Load & preview before run
@@ -440,7 +482,7 @@ with run_tab:
 
     if run_clicked:
         try:
-            # Smart pipeline (no knobs)
+            # Smart pipeline
             # 1) strip vendor prefixes
             p_df = strip_carrier_prefixes(p_df); c_df = strip_carrier_prefixes(c_df); b_df = strip_carrier_prefixes(b_df)
             # 2) apply aliases (assign!)
@@ -462,46 +504,48 @@ with run_tab:
             # 5) aggregate by SSN+Plan (distinct amounts) to neutralize split lines
             p_tot = aggregate_by_key_distinct(p_df); c_tot = aggregate_by_key_distinct(c_df); b_tot = aggregate_by_key_distinct(b_df)
 
-            # 6) totals engine
+            # 6) frequency-aware totals engine
             if p_tot is not None and c_tot is not None and b_tot is not None and not p_tot.empty and not c_tot.empty and not b_tot.empty:
-                errors_df, summary_df, _ = reconcile_totals_three(p_tot, c_tot, b_tot, amount_tolerance_cents)
-                mode = "Smart totals (Payroll vs Carrier vs BenAdmin)"
+                errors_df, summary_df, _comp, freq_resolved = reconcile_totals_three(p_tot, c_tot, b_tot, amount_tolerance_cents)
+                mode = "Smart totals (frequency-aware): Payroll vs Carrier vs BenAdmin"
                 compared_lines = len(pd.concat([p_tot, c_tot, b_tot], ignore_index=True))
             elif p_tot is not None and c_tot is not None and not p_tot.empty and not c_tot.empty:
-                errors_df, summary_df, compared_lines = reconcile_totals_two(p_tot, c_tot, "Payroll", "Carrier", amount_tolerance_cents)
-                mode = "Smart totals (Payroll vs Carrier)"
+                errors_df, summary_df, compared_lines, freq_resolved = reconcile_totals_two(p_tot, c_tot, "Payroll", "Carrier", amount_tolerance_cents)
+                mode = "Smart totals (frequency-aware): Payroll vs Carrier"
             elif p_tot is not None and b_tot is not None and not p_tot.empty and not b_tot.empty:
-                errors_df, summary_df, compared_lines = reconcile_totals_two(p_tot, b_tot, "Payroll", "BenAdmin", amount_tolerance_cents)
-                mode = "Smart totals (Payroll vs BenAdmin)"
+                errors_df, summary_df, compared_lines, freq_resolved = reconcile_totals_two(p_tot, b_tot, "Payroll", "BenAdmin", amount_tolerance_cents)
+                mode = "Smart totals (frequency-aware): Payroll vs BenAdmin"
             elif c_tot is not None and b_tot is not None and not c_tot.empty and not b_tot.empty:
-                errors_df, summary_df, compared_lines = reconcile_totals_two(c_tot, b_tot, "Carrier", "BenAdmin", amount_tolerance_cents)
-                mode = "Smart totals (Carrier vs BenAdmin)"
+                errors_df, summary_df, compared_lines, freq_resolved = reconcile_totals_two(c_tot, b_tot, "Carrier", "BenAdmin", amount_tolerance_cents)
+                mode = "Smart totals (frequency-aware): Carrier vs BenAdmin"
             else:
                 st.warning("Please upload at least two files to reconcile."); st.markdown('</div>', unsafe_allow_html=True); st.stop()
 
-            # 7) drilldown only where totals mismatched (replace those with row-level detail)
+            # 7) drilldown for remaining amount mismatches (precise row-level detail)
             if not errors_df.empty:
                 mismatch_mask = errors_df["Error Type"].str.contains("Amount Mismatch", case=False, na=False)
                 keys = set(zip(errors_df.loc[mismatch_mask, "SSN"], errors_df.loc[mismatch_mask, "Plan Name"]))
                 if keys:
                     row_detail = drilldown_row_level_for_keys(p_df, c_df, b_df, keys, threshold)
                     if row_detail is not None and not row_detail.empty:
-                        # drop the coarse totals mismatches for those keys, keep missings & others
                         keep_idx = []
                         for i, r in errors_df.iterrows():
                             if mismatch_mask.iloc[i] and (str(r["SSN"]), str(r["Plan Name"])) in keys:
                                 continue
                             keep_idx.append(i)
                         errors_df = pd.concat([errors_df.iloc[keep_idx].reset_index(drop=True), row_detail], ignore_index=True)
-                        # rebuild summary
                         if not errors_df.empty:
                             summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
                             summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
 
             st.success(f"Completed: {mode}")
             if dup_notes: st.caption(" • ".join(dup_notes))
+            if freq_resolved:
+                st.caption(f"Resolved {freq_resolved} premium differences by recognizing monthly/per-pay frequency scaling.")
 
             # Insights
+            minutes_per_line = 1.2  # sensible default; still editable in Advanced if needed
+            hourly_rate = 40
             ins = compute_insights(summary_df, errors_df, compared_lines, minutes_per_line, hourly_rate)
             a,b = st.columns([2,1])
             with a: render_quick_insights(ins)
@@ -544,7 +588,7 @@ with run_tab:
                     st.markdown("**Carrier**");  st.dataframe(_filter(c_df), use_container_width=True, height=200)
                     st.markdown("**BenAdmin**"); st.dataframe(_filter(b_df), use_container_width=True, height=200)
 
-            # Exports
+            # Export
             st.markdown("#### Export")
             xlsx = export_errors_multitab(errors_df, summary_df, group_name=group_name, period=period)
             c1,c2,c3 = st.columns(3)
@@ -583,11 +627,14 @@ with help_tab:
 
         **File types**: CSV or Excel (first sheet).
 
-        **Plan Name matching**: IvyRecon auto-applies aliases + fuzzy normalization. Threshold is in Advanced.
+        **Plan Name matching**: IvyRecon auto-applies aliases + fuzzy normalization (and strips vendor words, e.g., "Sun Life").
+
+        **Smart Totals**: We automatically recognize monthly vs per-pay premium scales (×2, ×4, ×24/26, ×52) to avoid false mismatches.
 
         **Exports**: Multi-tab Excel includes Summary, All Errors, and one sheet per error type — branded to IvyRecon.
         """
     )
+
 
 
 
