@@ -325,10 +325,10 @@ def _unique_keys_count(*dfs: pd.DataFrame) -> int:
             keys.update([f"row-{i}-df-{id(df)}" for i in range(len(df))])
     return len(keys)
 
-def aggregate_by_key(df: pd.DataFrame, ignore_duplicate_amounts: bool = True) -> pd.DataFrame:
+def aggregate_by_key_distinct(df: pd.DataFrame) -> pd.DataFrame:
     """
     Collapse to one row per (SSN, Plan Name).
-    - Sums Employee/Employer costs, but (optionally) ignores duplicate amount lines
+    - Sums Employee/Employer costs but ignores duplicate amount lines
       so identical amounts aren't double-counted.
     - Keeps First/Last Name from the first occurrence.
     """
@@ -343,12 +343,11 @@ def aggregate_by_key(df: pd.DataFrame, ignore_duplicate_amounts: bool = True) ->
     out = df.copy()
 
     # Drop exact duplicate amount lines before aggregating (prevents doubling)
-    if ignore_duplicate_amounts:
-        dupe_cols = [c for c in ["SSN", "Plan Name", "Employee Cost", "Employer Cost"] if c in cols]
-        if dupe_cols:
-            out = out.drop_duplicates(subset=dupe_cols, keep="first")
+    dupe_cols = [c for c in ["SSN", "Plan Name", "Employee Cost", "Employer Cost"] if c in cols]
+    if dupe_cols:
+        out = out.drop_duplicates(subset=dupe_cols, keep="first")
 
-    # Sum distinct amounts within each group (handles split-premium 7.62 + 2.54, but not 9.41 + 9.41 twice)
+    # Sum DISTINCT amounts in each group (handles 7.62 + 2.54, but not 9.41 + 9.41 twice)
     def _sum_distinct(series):
         s = pd.to_numeric(series, errors="coerce").dropna()
         return s.drop_duplicates().sum()
@@ -750,11 +749,11 @@ with run_tab:
             c_df = strip_carrier_prefixes(c_df)
             b_df = strip_carrier_prefixes(b_df)
 
-            # --- NEW (3): Amount comparison strategy ---
+            # --- Amount comparison strategy ---
             if amount_match_mode == "Aggregate by SSN + Plan (sum)":
-                p_df = aggregate_by_key(p_df, ignore_duplicate_amounts=True)
-                c_df = aggregate_by_key(c_df, ignore_duplicate_amounts=True)
-                b_df = aggregate_by_key(b_df, ignore_duplicate_amounts=True)
+                p_df = aggregate_by_key_distinct(p_df)
+                c_df = aggregate_by_key_distinct(c_df)
+                b_df = aggregate_by_key_distinct(b_df)
                 st.caption("Comparing aggregated totals per SSN + Plan (duplicate amount lines ignored).")
 
             # Now proceed to reconcile
