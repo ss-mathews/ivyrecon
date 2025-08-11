@@ -144,6 +144,70 @@ def render_error_chips(summary_df: pd.DataFrame):
     if total: chips.append(f'<div class="chip"><b>Total:</b> {total}</div>')
     st.markdown(" ".join(chips), unsafe_allow_html=True)
 
+def _clean_money(x):
+    if pd.isna(x): return pd.NA
+    s = str(x).strip()
+    if s == "": return pd.NA
+    s = s.replace("$", "").replace(",", "")
+    try:
+        return float(s)
+    except:
+        return pd.NA
+
+def standardize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize columns used for matching/comparison:
+    - SSN -> digits only, keep leading zeros (string)
+    - Plan Name -> trimmed/lower, alias-normalized later
+    - Names -> trimmed title-case (doesn’t affect matching but keeps tidy)
+    - Amounts -> numeric (strip $, ,)
+    - Strip surrounding spaces on all string columns
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    # Trim all string-like columns
+    for c in df.columns:
+        if df[c].dtype == object:
+            df[c] = df[c].astype(str).str.strip()
+
+    # Tolerant column access
+    cols = {c.lower(): c for c in df.columns}
+    ssn_col = cols.get("ssn")
+    plan_col = cols.get("plan name") or cols.get("plan")
+    fn_col = cols.get("first name")
+    ln_col = cols.get("last name")
+    ee_amt_col = cols.get("employee cost") or cols.get("employee amount") or cols.get("ee amount")
+    er_amt_col = cols.get("employer cost") or cols.get("employer amount") or cols.get("er amount")
+
+    # SSN -> digits-only, keep leading zeros, as string
+    if ssn_col:
+        df[ssn_col] = (
+            df[ssn_col]
+            .astype(str)
+            .str.replace(r"\D", "", regex=True)
+            .str.zfill(9)
+        )
+
+    # Names tidy (optional; not used for joins)
+    if fn_col: df[fn_col] = df[fn_col].astype(str).str.strip().str.title()
+    if ln_col: df[ln_col] = df[ln_col].astype(str).str.strip().str.title()
+
+    # Plan tidy (alias normalization will run later)
+    if plan_col:
+        df[plan_col] = df[plan_col].astype(str).str.strip().str.lower()
+
+    # Amounts to numeric
+    if ee_amt_col:
+        df[ee_amt_col] = df[ee_amt_col].apply(_clean_money)
+    if er_amt_col:
+        df[er_amt_col] = df[er_amt_col].apply(_clean_money)
+
+    return df
+
+
 def _unique_keys_count(*dfs: pd.DataFrame) -> int:
     keys = set()
     for df in dfs:
@@ -335,6 +399,12 @@ with run_tab:
     c_df = load_any(carrier_file)
     b_df = load_any(benadmin_file)
 
+    # Standardize all
+    p_df = standardize_df(p_df)
+    c_df = standardize_df(c_df)
+    b_df = standardize_df(b_df)
+
+
     # Column Mapper UI per file (expander)
     def map_columns_ui(df: pd.DataFrame, label: str):
         if df is None or df.empty:
@@ -426,6 +496,35 @@ with run_tab:
                 st.stop()
 
             st.success(f"Completed: {mode}")
+
+            with st.expander("🔎 Debug Investigator: check an employee/plan across files"):
+                q_ssn = st.text_input("Enter SSN (9 digits or last 4 ok)")
+                q_plan = st.text_input("Optional: Plan contains (e.g., accident)")
+            if st.button("Find Records"):
+                def _filter(df):
+                    if df is None or df.empty: return df
+                    cols = {c.lower(): c for c in df.columns}
+                    ssn_col = cols.get("ssn")
+                    plan_col = cols.get("plan name") or cols.get("plan")
+                    out = df
+                    if q_ssn:
+                        s = str(q_ssn).strip()
+                        s = "".join(ch for ch in s if ch.isdigit())
+                        # match by last4 if user typed last4, else full
+                        if len(s) == 4:
+                            out = out[out[ssn_col].astype(str).str[-4:] == s] if ssn_col else out
+                        elif len(s) == 9:
+                            out = out[out[ssn_col].astype(str) == s] if ssn_col else out
+                    if q_plan and (plan_col in out.columns):
+                        out = out[out[plan_col].astype(str).str.contains(q_plan.strip().lower(), na=False)]
+                    return out
+
+                st.markdown("**Payroll match**")
+                st.dataframe(_filter(p_df), use_container_width=True, height=200)
+                st.markdown("**Carrier match**")
+                st.dataframe(_filter(c_df), use_container_width=True, height=200)
+                st.markdown("**BenAdmin match**")
+                st.dataframe(_filter(b_df), use_container_width=True, height=200)
 
             ins = compute_insights(summary_df, errors_df, compared_lines, minutes_per_line, hourly_rate)
             # Insights block
