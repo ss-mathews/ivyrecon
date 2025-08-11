@@ -226,6 +226,66 @@ def dedupe_exact(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     out = df.drop_duplicates(subset=key_cols, keep="first").reset_index(drop=True)
     return out, before - len(out)
 
+def postfilter_split_amounts(errors_df: pd.DataFrame, summary_df: pd.DataFrame, tolerance_cents: int = 2):
+    if errors_df is None or errors_df.empty:
+        return errors_df, summary_df, 0
+
+    # Only look at Employee Amount mismatches (you can extend for Employer if needed)
+    mask = errors_df["Error Type"].str.contains("Employee Amount Mismatch", case=False, na=False)
+    if not mask.any():
+        return errors_df, summary_df, 0
+
+    tol = max(0, int(tolerance_cents)) / 100.0
+    sub = errors_df[mask].copy()
+
+    # Group by SSN + Plan Name
+    grp_cols = [c for c in ["SSN", "Plan Name"] if c in sub.columns]
+    if not grp_cols:
+        return errors_df, summary_df, 0
+
+    g = (
+        sub.groupby(grp_cols, dropna=False)
+           .agg({
+               "Employee Cost (Payroll)": "first",
+               "Employee Cost (BenAdmin)": "sum"
+           })
+           .reset_index()
+    )
+
+    to_drop_keys = set()
+    for _, r in g.iterrows():
+        a = float(r["Employee Cost (Payroll)"]) if pd.notna(r["Employee Cost (Payroll)"]) else 0.0
+        b = float(r["Employee Cost (BenAdmin)"]) if pd.notna(r["Employee Cost (BenAdmin)"]) else 0.0
+        if abs(a - b) <= tol:
+            to_drop_keys.add(tuple(r[k] for k in grp_cols))
+
+    if not to_drop_keys:
+        return errors_df, summary_df, 0
+
+    keep_idx = []
+    dropped = 0
+    for idx, row in errors_df.iterrows():
+        if not mask.loc[idx]:
+            keep_idx.append(idx)
+            continue
+        key = tuple(row.get(k) for k in grp_cols)
+        if key in to_drop_keys:
+            dropped += 1
+        else:
+            keep_idx.append(idx)
+
+    filtered = errors_df.loc[keep_idx].reset_index(drop=True)
+
+    # Rebuild summary
+    if "Error Type" in filtered.columns:
+        new_summary = filtered.groupby("Error Type", dropna=False).size().reset_index(name="Count")
+        total = pd.DataFrame({"Error Type": ["Total"], "Count": [int(new_summary["Count"].sum())]})
+        new_summary = pd.concat([new_summary, total], ignore_index=True)
+    else:
+        new_summary = summary_df
+
+    return filtered, new_summary, dropped
+
 def aggregate_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     """
     Collapse duplicates by summing amounts per (SSN, Plan Name).
@@ -398,9 +458,15 @@ def aggregate_by_key(df: pd.DataFrame) -> pd.DataFrame:
     if not req:
         return df
     sums = {c: "sum" for c in ["Employee Cost", "Employer Cost"] if c in df.columns}
-    keep = {c: "first" for c in ["First Name", "Last Name"] if c in df.columns}
-    agg = {**sums, **keep} if sums else keep
-    return df.groupby(req, dropna=False, as_index=False).agg(agg)
+    keep_cols = [c for c in ["First Name", "Last Name"] if c in df.columns]
+    agg = sums.copy()
+    for col in keep_cols:
+        agg[col] = "first"
+    return (
+        df.groupby(req, dropna=False, as_index=False)
+          .agg(agg)
+          .reset_index(drop=True)
+    )
 
 def render_quick_insights(ins):
     m1, m2, m3, m4, m5 = st.columns(5)
@@ -769,6 +835,13 @@ with run_tab:
                 st.stop()
 
             st.success(f"Completed: {mode}")
+
+            # Safety net: collapse split-amount mismatches where totals match within tolerance
+            errors_df, summary_df, removed_splits = postfilter_split_amounts(
+                errors_df, summary_df, tolerance_cents=amount_tolerance_cents
+            )
+            if removed_splits:
+                st.caption(f"Collapsed {removed_splits} split-amount mismatches where BenAdmin totals matched Payroll within {amount_tolerance_cents}¢.")
 
             # After st.success(f"Completed: {mode}") and before rendering results:
             errors_df, summary_df, removed_eq = postfilter_amount_mismatches(
