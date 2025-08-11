@@ -265,6 +265,36 @@ def _unique_keys_count(*dfs: pd.DataFrame) -> int:
             keys.update([f"row-{i}-df-{id(df)}" for i in range(len(df))])
     return len(keys)
 
+def aggregate_by_key(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse to one row per (SSN, Plan Name), summing Employee/Employer costs.
+    Keep First/Last Name from the first occurrence.
+    """
+    if df is None or df.empty:
+        return df
+
+    # Required group-by keys
+    req = [c for c in ["SSN", "Plan Name"] if c in df.columns]
+    if not req:
+        return df
+
+    # Columns to sum
+    sums = {c: "sum" for c in ["Employee Cost", "Employer Cost"] if c in df.columns}
+
+    # Columns to keep the first value for
+    keep_cols = [c for c in ["First Name", "Last Name"] if c in df.columns]
+
+    agg = sums.copy()
+    for col in keep_cols:
+        agg[col] = "first"
+
+    return (
+        df.groupby(req, dropna=False, as_index=False)
+          .agg(agg)
+          .reset_index(drop=True)
+    )
+
+        
 def _to_float_or_none(v):
     try:
         if pd.isna(v): 
@@ -360,6 +390,17 @@ def compute_insights(summary_df: pd.DataFrame, errors_df: pd.DataFrame, compared
     return {"total_errors": total_errors, "most_common": most_common, "mismatch_pct": mismatch_pct,
             "error_rate": error_rate, "compared_lines": compared_lines, "minutes_saved": minutes_saved,
             "hours_saved": hours_saved, "dollars_saved": dollars_saved}
+
+def aggregate_by_key(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    req = [c for c in ["SSN", "Plan Name"] if c in df.columns]
+    if not req:
+        return df
+    sums = {c: "sum" for c in ["Employee Cost", "Employer Cost"] if c in df.columns}
+    keep = {c: "first" for c in ["First Name", "Last Name"] if c in df.columns}
+    agg = {**sums, **keep} if sums else keep
+    return df.groupby(req, dropna=False, as_index=False).agg(agg)
 
 def render_quick_insights(ins):
     m1, m2, m3, m4, m5 = st.columns(5)
@@ -499,6 +540,13 @@ with run_tab:
         st.markdown("**ROI Assumptions**")
         minutes_per_line = st.slider("Manual mins per line", 0.5, 3.0, 1.2, 0.1)
         hourly_rate = st.slider("Hourly cost ($)", 15, 150, 40, 5)
+
+        amount_match_mode = st.selectbox(
+            "Amount comparison",
+            ["Per-line (default)", "Aggregate by SSN + Plan (sum)"],
+            index=0,
+            help="Use aggregate when one system splits premiums across multiple rows."
+        )
         # right after hourly_rate slider
         treat_blank_as_zero = st.checkbox(
             "Treat blank amounts as $0.00",
@@ -625,6 +673,23 @@ with run_tab:
             p_df = strip_carrier_prefixes(p_df)
             c_df = strip_carrier_prefixes(c_df)
             b_df = strip_carrier_prefixes(b_df)
+
+            # --- NEW (3): Amount comparison strategy ---
+            if amount_match_mode == "Aggregate by SSN + Plan (sum)":
+                p_df = aggregate_by_key(p_df)
+                c_df = aggregate_by_key(c_df)
+                b_df = aggregate_by_key(b_df)
+                st.caption("Comparing aggregated totals per SSN + Plan (summing Employee/Employer costs).")
+
+            # Now proceed to reconcile
+            if p_df is not None and c_df is not None and b_df is not None:
+                errors_df, summary_df = reconcile_three(p_df, c_df, b_df, plan_match_threshold=threshold)
+                mode = "Three-way (Payroll vs Carrier vs BenAdmin)"
+                compared_lines = _unique_keys_count(p_df, c_df, b_df)
+            elif p_df is not None and c_df is not None:
+                errors_df, summary_df = reconcile_two(p_df, c_df, "Payroll", "Carrier", plan_match_threshold=threshold)
+                mode = "Two-way (Payroll vs Carrier)"
+                compared_lines = _unique_keys_count(p_df, c_df)
 
             # 3) APPLY ALIASES (ASSIGN the returned DataFrames!)
             aliases = st.session_state["aliases"]
