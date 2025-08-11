@@ -325,35 +325,45 @@ def _unique_keys_count(*dfs: pd.DataFrame) -> int:
             keys.update([f"row-{i}-df-{id(df)}" for i in range(len(df))])
     return len(keys)
 
-def aggregate_by_key(df: pd.DataFrame) -> pd.DataFrame:
+def aggregate_by_key(df: pd.DataFrame, ignore_duplicate_amounts: bool = True) -> pd.DataFrame:
     """
-    Collapse to one row per (SSN, Plan Name), summing Employee/Employer costs.
-    Keep First/Last Name from the first occurrence.
+    Collapse to one row per (SSN, Plan Name).
+    - Sums Employee/Employer costs, but (optionally) ignores duplicate amount lines
+      so identical amounts aren't double-counted.
+    - Keeps First/Last Name from the first occurrence.
     """
     if df is None or df.empty:
         return df
 
-    # Required group-by keys
-    req = [c for c in ["SSN", "Plan Name"] if c in df.columns]
+    cols = df.columns
+    req = [c for c in ["SSN", "Plan Name"] if c in cols]
     if not req:
         return df
 
-    # Columns to sum
-    sums = {c: "sum" for c in ["Employee Cost", "Employer Cost"] if c in df.columns}
+    out = df.copy()
 
-    # Columns to keep the first value for
-    keep_cols = [c for c in ["First Name", "Last Name"] if c in df.columns]
+    # Drop exact duplicate amount lines before aggregating (prevents doubling)
+    if ignore_duplicate_amounts:
+        dupe_cols = [c for c in ["SSN", "Plan Name", "Employee Cost", "Employer Cost"] if c in cols]
+        if dupe_cols:
+            out = out.drop_duplicates(subset=dupe_cols, keep="first")
 
-    agg = sums.copy()
-    for col in keep_cols:
-        agg[col] = "first"
+    # Sum distinct amounts within each group (handles split-premium 7.62 + 2.54, but not 9.41 + 9.41 twice)
+    def _sum_distinct(series):
+        s = pd.to_numeric(series, errors="coerce").dropna()
+        return s.drop_duplicates().sum()
+
+    agg = {}
+    if "Employee Cost" in cols: agg["Employee Cost"] = _sum_distinct
+    if "Employer Cost" in cols: agg["Employer Cost"] = _sum_distinct
+    for k in ["First Name", "Last Name"]:
+        if k in cols: agg[k] = "first"
 
     return (
-        df.groupby(req, dropna=False, as_index=False)
-          .agg(agg)
-          .reset_index(drop=True)
+        out.groupby(req, dropna=False, as_index=False)
+           .agg(agg)
+           .reset_index(drop=True)
     )
-
         
 def _to_float_or_none(v):
     try:
@@ -742,10 +752,10 @@ with run_tab:
 
             # --- NEW (3): Amount comparison strategy ---
             if amount_match_mode == "Aggregate by SSN + Plan (sum)":
-                p_df = aggregate_by_key(p_df)
-                c_df = aggregate_by_key(c_df)
-                b_df = aggregate_by_key(b_df)
-                st.caption("Comparing aggregated totals per SSN + Plan (summing Employee/Employer costs).")
+                p_df = aggregate_by_key(p_df, ignore_duplicate_amounts=True)
+                c_df = aggregate_by_key(c_df, ignore_duplicate_amounts=True)
+                b_df = aggregate_by_key(b_df, ignore_duplicate_amounts=True)
+                st.caption("Comparing aggregated totals per SSN + Plan (duplicate amount lines ignored).")
 
             # Now proceed to reconcile
             if p_df is not None and c_df is not None and b_df is not None:
