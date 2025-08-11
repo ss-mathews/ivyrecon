@@ -650,7 +650,29 @@ with run_tab:
 
             p_df = _apply_dup_mode(p_df, "Payroll")
             c_df = _apply_dup_mode(c_df, "Carrier")
-            b_df = _apply_dup_mode(b_df, "BenAdmin")        
+            b_df = _apply_dup_mode(b_df, "BenAdmin") 
+
+            def normalize_cost_columns(df):
+                if df is None or df.empty:
+                    return df
+                for col in ["Employee Cost", "Employer Cost"]:
+                    if col in df.columns:
+                        # Replace dashes and blanks with 0, then convert to float
+                        df[col] = (
+                            df[col]
+                            .replace("-", 0)
+                            .replace("", 0)
+                            .fillna(0)
+                            .apply(lambda x: 0 if str(x).strip() in ["-", ""] else x)
+                        )
+                        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+                return df
+
+            # Apply normalization to all input DataFrames
+            p_df = normalize_cost_columns(p_df)
+            c_df = normalize_cost_columns(c_df)
+            b_df = normalize_cost_columns(b_df)
+       
 
             if p_df is not None and c_df is not None and b_df is not None:
                 errors_df, summary_df = reconcile_three(p_df, c_df, b_df, plan_match_threshold=threshold)
