@@ -460,23 +460,6 @@ def compute_insights(summary_df: pd.DataFrame, errors_df: pd.DataFrame, compared
             "error_rate": error_rate, "compared_lines": compared_lines, "minutes_saved": minutes_saved,
             "hours_saved": hours_saved, "dollars_saved": dollars_saved}
 
-def aggregate_by_key(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    req = [c for c in ["SSN", "Plan Name"] if c in df.columns]
-    if not req:
-        return df
-    sums = {c: "sum" for c in ["Employee Cost", "Employer Cost"] if c in df.columns}
-    keep_cols = [c for c in ["First Name", "Last Name"] if c in df.columns]
-    agg = sums.copy()
-    for col in keep_cols:
-        agg[col] = "first"
-    return (
-        df.groupby(req, dropna=False, as_index=False)
-          .agg(agg)
-          .reset_index(drop=True)
-    )
-
 def render_quick_insights(ins):
     m1, m2, m3, m4, m5 = st.columns(5)
     with m1: st.metric("Lines Reconciled", f"{ins['compared_lines']:,}")
@@ -727,12 +710,12 @@ with run_tab:
 
     if st.session_state.ran:
         try:
-            # 1) STANDARDIZE (make sure you have standardize_df() defined above)
+            # 1) STANDARDIZE
             p_df = standardize_df(p_df)
             c_df = standardize_df(c_df)
             b_df = standardize_df(b_df)
 
-            # 2) STRIP CARRIER PREFIXES (optional helper; safe to skip if you didn’t add it)
+            # 2) STRIP CARRIER PREFIXES (optional)
             def strip_carrier_prefixes(df):
                 if df is None or df.empty or "Plan Name" not in df.columns:
                     return df
@@ -749,46 +732,27 @@ with run_tab:
             c_df = strip_carrier_prefixes(c_df)
             b_df = strip_carrier_prefixes(b_df)
 
-            # --- Amount comparison strategy ---
-            if amount_match_mode == "Aggregate by SSN + Plan (sum)":
-                p_df = aggregate_by_key_distinct(p_df)
-                c_df = aggregate_by_key_distinct(c_df)
-                b_df = aggregate_by_key_distinct(b_df)
-                st.caption("Comparing aggregated totals per SSN + Plan (duplicate amount lines ignored).")
-
-            # Now proceed to reconcile
-            if p_df is not None and c_df is not None and b_df is not None:
-                errors_df, summary_df = reconcile_three(p_df, c_df, b_df, plan_match_threshold=threshold)
-                mode = "Three-way (Payroll vs Carrier vs BenAdmin)"
-                compared_lines = _unique_keys_count(p_df, c_df, b_df)
-            elif p_df is not None and c_df is not None:
-                errors_df, summary_df = reconcile_two(p_df, c_df, "Payroll", "Carrier", plan_match_threshold=threshold)
-                mode = "Two-way (Payroll vs Carrier)"
-                compared_lines = _unique_keys_count(p_df, c_df)
-
-            # 3) APPLY ALIASES (ASSIGN the returned DataFrames!)
+            # 3) APPLY ALIASES (ASSIGN BACK)
             aliases = st.session_state["aliases"]
             p_df = apply_aliases_to_df(p_df, "Plan Name", aliases, threshold=threshold) if p_df is not None else None
             c_df = apply_aliases_to_df(c_df, "Plan Name", aliases, threshold=threshold) if c_df is not None else None
             b_df = apply_aliases_to_df(b_df, "Plan Name", aliases, threshold=threshold) if b_df is not None else None
 
-            # (optional tiny stat to confirm canon consolidation)
+            # tiny stat to confirm consolidation
             def _canon_stats(df, label):
                 if df is not None and "Plan Name" in df.columns:
                     st.caption(f"{label}: {df['Plan Name'].nunique()} canonical plan names after aliases")
             _canon_stats(p_df, "Payroll"); _canon_stats(c_df, "Carrier"); _canon_stats(b_df, "BenAdmin")
 
-            # 4) NORMALIZE AMOUNTS (blank/'-' → 0, snap to cents, apply tolerance slider)
+            # 4) NORMALIZE AMOUNTS (blank/'-' → 0, tolerance)
             def _normalize_amounts(df: pd.DataFrame):
                 if df is None or df.empty:
                     return df
                 out = df.copy()
                 for col in ["Employee Cost", "Employer Cost"]:
                     if col in out.columns:
-                        # blanks & '-' to zero if enabled
                         if treat_blank_as_zero:
                             out[col] = out[col].replace(["", "-", "--"], 0).fillna(0)
-                        # numeric conversion, then tolerance
                         out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0 if treat_blank_as_zero else 0)
                         out[col] = (out[col] * 100).round() / 100.0  # standard cents
                         step = max(1, amount_tolerance_cents)
@@ -801,7 +765,7 @@ with run_tab:
             c_df = _normalize_amounts(c_df)
             b_df = _normalize_amounts(b_df)
 
-            # 5) DUPLICATE HANDLING (requires dedupe_exact / aggregate_duplicates defined above)
+            # 5) DUPLICATE HANDLING
             dup_notes = []
 
             def _apply_dup_mode(df, label):
@@ -815,13 +779,20 @@ with run_tab:
                     new_df, removed = aggregate_duplicates(df)
                     if removed: dup_notes.append(f"{label}: aggregated {removed} row(s) into keys")
                     return new_df
-                return df  # Keep all (strict)
+                return df
 
             p_df = _apply_dup_mode(p_df, "Payroll")
             c_df = _apply_dup_mode(c_df, "Carrier")
             b_df = _apply_dup_mode(b_df, "BenAdmin")
 
-            # 6) RECONCILE
+            # 6) (OPTIONAL) AGGREGATE BY SSN+PLAN — NOW that aliases/amounts/dups are clean
+            if amount_match_mode == "Aggregate by SSN + Plan (sum)":
+                p_df = aggregate_by_key_distinct(p_df)
+                c_df = aggregate_by_key_distinct(c_df)
+                b_df = aggregate_by_key_distinct(b_df)
+                st.caption("Comparing aggregated totals per SSN + Plan (duplicate amount lines ignored).")
+
+            # 7) RECONCILE (ONLY ONCE)
             if p_df is not None and c_df is not None and b_df is not None:
                 errors_df, summary_df = reconcile_three(p_df, c_df, b_df, plan_match_threshold=threshold)
                 mode = "Three-way (Payroll vs Carrier vs BenAdmin)"
@@ -863,31 +834,29 @@ with run_tab:
             with st.expander("🔎 Debug Investigator: check an employee/plan across files"):
                 q_ssn = st.text_input("Enter SSN (9 digits or last 4 ok)")
                 q_plan = st.text_input("Optional: Plan contains (e.g., accident)")
-            if st.button("Find Records"):
-                def _filter(df):
-                    if df is None or df.empty: return df
-                    cols = {c.lower(): c for c in df.columns}
-                    ssn_col = cols.get("ssn")
-                    plan_col = cols.get("plan name") or cols.get("plan")
-                    out = df
-                    if q_ssn:
-                        s = str(q_ssn).strip()
-                        s = "".join(ch for ch in s if ch.isdigit())
-                        # match by last4 if user typed last4, else full
-                        if len(s) == 4:
-                            out = out[out[ssn_col].astype(str).str[-4:] == s] if ssn_col else out
-                        elif len(s) == 9:
-                            out = out[out[ssn_col].astype(str) == s] if ssn_col else out
-                    if q_plan and (plan_col in out.columns):
-                        out = out[out[plan_col].astype(str).str.contains(q_plan.strip().lower(), na=False)]
-                    return out
+                if st.button("Find Records"):
+                    def _filter(df):
+                        if df is None or df.empty: return df
+                        cols = {c.lower(): c for c in df.columns}
+                        ssn_col = cols.get("ssn")
+                        plan_col = cols.get("plan name") or cols.get("plan")
+                        out = df
+                        if q_ssn and ssn_col:
+                            s = "".join(ch for ch in str(q_ssn).strip() if ch.isdigit())
+                            if len(s) == 4:
+                                out = out[out[ssn_col].astype(str).str[-4:] == s]
+                            elif len(s) == 9:
+                                out = out[out[ssn_col].astype(str) == s]
+                        if q_plan and plan_col:
+                            out = out[out[plan_col].astype(str).str.contains(q_plan.strip().lower(), na=False)]
+                        return out
 
-                st.markdown("**Payroll match**")
-                st.dataframe(_filter(p_df), use_container_width=True, height=200)
-                st.markdown("**Carrier match**")
-                st.dataframe(_filter(c_df), use_container_width=True, height=200)
-                st.markdown("**BenAdmin match**")
-                st.dataframe(_filter(b_df), use_container_width=True, height=200)
+                    st.markdown("**Payroll match**")
+                    st.dataframe(_filter(p_df), use_container_width=True, height=200)
+                    st.markdown("**Carrier match**")
+                    st.dataframe(_filter(c_df), use_container_width=True, height=200)
+                    st.markdown("**BenAdmin match**")
+                    st.dataframe(_filter(b_df), use_container_width=True, height=200)
 
             ins = compute_insights(summary_df, errors_df, compared_lines, minutes_per_line, hourly_rate)
             # Insights block
