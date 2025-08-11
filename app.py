@@ -1,14 +1,13 @@
-# app.py — IvyRecon (Sales-Polished + Aliases + Column Mapper + Themed Excel)
-import os
+# app.py — IvyRecon (Smart Reconciliation: sales-friendly)
+import os, json
 from datetime import datetime
-import json
 
 import pandas as pd
 import streamlit as st
 import streamlit_authenticator as stauth
 import streamlit.components.v1 as components
 
-from reconcile import reconcile_two, reconcile_three
+from reconcile import reconcile_two, reconcile_three  # existing row-level engine
 from excel_export import export_errors_multitab
 from aliases import (
     DEFAULT_ALIASES, load_aliases_from_secrets, normalize_alias_dict,
@@ -17,7 +16,6 @@ from aliases import (
 
 # ---------------- Page setup & global style ----------------
 st.set_page_config(page_title="IvyRecon", page_icon="🪄", layout="wide")
-
 st.markdown(
     """
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -28,16 +26,14 @@ st.markdown(
       html, body, [class*="css"] { font-family:"Roboto",system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; color:var(--navy); }
       h1, h2, h3, h4, h5, h6 { font-family:"Raleway",sans-serif; letter-spacing:.2px; color:var(--navy); }
       .block-container { padding-top: 0; }
-      .ivy-header { position: sticky; top: 0; z-index: 50; background: #fff; border-bottom: 1px solid var(--line); }
+      .ivy-header { position: sticky; top: 0; z-index: 50; background:#fff; border-bottom:1px solid var(--line); }
       .ivy-header .wrap { display:flex; align-items:center; justify-content:space-between; padding: 12px 4px; }
       .ivy-brand { font-weight:700; font-size:18px; letter-spacing:.3px; }
       .ivy-badge { font-size:12px; padding:.2rem .5rem; border-radius:999px; background:var(--bg2); border:1px solid var(--line); }
       .stButton>button { background: var(--teal); color:#0F2A37; border:0; padding:.6rem 1rem; border-radius:12px; font-weight:600; }
       .stButton>button:hover { filter:brightness(0.97); }
       .card { border:1px solid var(--line); border-radius:16px; background:#fff; padding:16px; margin: 8px 0 16px; }
-      .card h3, .card h4 { margin-top: 0; }
       .chip { display:inline-flex; align-items:center; gap:.5rem; padding:.35rem .6rem; border-radius:999px; background:var(--bg2); color:var(--navy); border:1px solid var(--line); font-size:0.9rem; }
-      .chip b { color: var(--navy); }
       .chip.red { background:#FFF5F5; border-color:#FEE2E2; }
       .chip.yellow { background:#FFFBEB; border-color:#FEF3C7; }
       .chip.blue { background:#EFF6FF; border-color:#DBEAFE; }
@@ -55,25 +51,16 @@ ADMIN_NAME = st.secrets.get("ADMIN_NAME") or os.environ.get("ADMIN_NAME", "Admin
 ADMIN_PASSWORD_HASH = st.secrets.get("ADMIN_PASSWORD_HASH") or os.environ.get("ADMIN_PASSWORD_HASH", "$2b$12$PLACEHOLDER")
 
 credentials = {"usernames": {ADMIN_EMAIL: {"email": ADMIN_EMAIL, "name": ADMIN_NAME, "password": ADMIN_PASSWORD_HASH}}}
-
-authenticator = stauth.Authenticate(
-    credentials=credentials,
-    cookie_name="ivyrecon_cookies",
-    key="ivyrecon_key",
-    cookie_expiry_days=1,
-)
-
+authenticator = stauth.Authenticate(credentials=credentials, cookie_name="ivyrecon_cookies", key="ivyrecon_key", cookie_expiry_days=1)
 authenticator.login(location="main")
 auth_status = st.session_state.get("authentication_status")
-name = st.session_state.get("name")
-username = st.session_state.get("username")
+name = st.session_state.get("name"); username = st.session_state.get("username")
 
 if auth_status is False:
     st.error("Invalid credentials"); st.stop()
 elif auth_status is None:
     st.info("Enter your email and password to continue."); st.stop()
 
-# Sticky header
 st.markdown(
     f"""
     <div class="ivy-header">
@@ -91,22 +78,20 @@ with st.sidebar:
     st.markdown("---")
     st.caption("IvyRecon • Clean reconciliation for Payroll ↔ Carrier ↔ BenAdmin")
 
-# ---------------- State ----------------
+# ---------------- State & defaults ----------------
 if "upl_ver" not in st.session_state: st.session_state["upl_ver"] = 0
 if "ran" not in st.session_state: st.session_state["ran"] = False
-if "use_demo" not in st.session_state: st.session_state["use_demo"] = False
 if "aliases" not in st.session_state:
     from_secrets = load_aliases_from_secrets(st)
     st.session_state["aliases"] = merge_aliases(DEFAULT_ALIASES, normalize_alias_dict(from_secrets))
 
-REQUIRED = ["SSN", "First Name", "Last Name", "Plan Name", "Employee Cost", "Employer Cost"]
+REQUIRED = ["SSN","First Name","Last Name","Plan Name","Employee Cost","Employer Cost"]
 
-# ---------------- Helpers ----------------
+# ---------------- Helpers: I/O & styling ----------------
 def load_any(uploaded) -> pd.DataFrame | None:
     if uploaded is None: return None
     try:
-        if uploaded.name.lower().endswith((".xlsx", ".xls")):
-            return pd.read_excel(uploaded)
+        if uploaded.name.lower().endswith((".xlsx", ".xls")): return pd.read_excel(uploaded)
         return pd.read_csv(uploaded)
     except Exception as e:
         st.error(f"Failed to read {uploaded.name}: {e}"); return None
@@ -122,8 +107,7 @@ def style_errors(df: pd.DataFrame):
     return df.style.apply(_row_style, axis=1)
 
 def quick_stats(df: pd.DataFrame, label: str):
-    if df is None or df.empty:
-        st.metric(f"{label} Rows", 0, help="No file uploaded yet"); return
+    if df is None or df.empty: st.metric(f"{label} Rows", 0); return
     c1, c2, c3 = st.columns(3)
     with c1: st.metric(f"{label} Rows", len(df))
     with c2: st.metric(f"{label} Unique Employees", df["SSN"].astype(str).nunique() if "SSN" in df.columns else 0)
@@ -139,340 +123,206 @@ def render_error_chips(summary_df: pd.DataFrame):
         color = "blue"
         if et.startswith("Missing in"): color = "yellow"
         elif "Mismatch" in et: color = "red"
-        elif "Duplicate" in et: color = "blue"
         chips.append(f'<div class="chip {color}"><b>{cnt}</b> {et}</div>')
     if total: chips.append(f'<div class="chip"><b>Total:</b> {total}</div>')
     st.markdown(" ".join(chips), unsafe_allow_html=True)
 
+# ---------------- Helpers: normalization & matching ----------------
 def _clean_money(x):
     if pd.isna(x): return pd.NA
     s = str(x).strip()
-    if s == "": return pd.NA
-    s = s.replace("$", "").replace(",", "")
-    try:
-        return float(s)
-    except:
-        return pd.NA
+    if s in ("", "-", "--"): return 0.0
+    s = s.replace("$","").replace(",","")
+    try: return float(s)
+    except: return pd.NA
 
 def standardize_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize columns used for matching/comparison:
-    - SSN -> digits only, keep leading zeros (string)
-    - Plan Name -> trimmed/lower, alias-normalized later
-    - Names -> trimmed title-case (doesn’t affect matching but keeps tidy)
-    - Amounts -> numeric (strip $, ,)
-    - Strip surrounding spaces on all string columns
-    """
-    if df is None or df.empty:
-        return df
-
+    if df is None or df.empty: return df
     df = df.copy()
-
-    # Trim all string-like columns
     for c in df.columns:
-        if df[c].dtype == object:
-            df[c] = df[c].astype(str).str.strip()
-
-    # Tolerant column access
+        if df[c].dtype == object: df[c] = df[c].astype(str).str.strip()
     cols = {c.lower(): c for c in df.columns}
-    ssn_col = cols.get("ssn")
+    ssn_col  = cols.get("ssn")
     plan_col = cols.get("plan name") or cols.get("plan")
-    fn_col = cols.get("first name")
-    ln_col = cols.get("last name")
-    ee_amt_col = cols.get("employee cost") or cols.get("employee amount") or cols.get("ee amount")
-    er_amt_col = cols.get("employer cost") or cols.get("employer amount") or cols.get("er amount")
-
-    # SSN -> digits-only, keep leading zeros, as string
-    if ssn_col:
-        df[ssn_col] = (
-            df[ssn_col]
-            .astype(str)
-            .str.replace(r"\D", "", regex=True)
-            .str.zfill(9)
-        )
-
-    # Names tidy (optional; not used for joins)
-    if fn_col: df[fn_col] = df[fn_col].astype(str).str.strip().str.title()
-    if ln_col: df[ln_col] = df[ln_col].astype(str).str.strip().str.title()
-
-    # Plan tidy (alias normalization will run later)
-    if plan_col:
-        df[plan_col] = df[plan_col].astype(str).str.strip().str.lower()
-
-    # Amounts to numeric
-    if ee_amt_col:
-        df[ee_amt_col] = df[ee_amt_col].apply(_clean_money)
-    if er_amt_col:
-        df[er_amt_col] = df[er_amt_col].apply(_clean_money)
-
+    fn_col   = cols.get("first name")
+    ln_col   = cols.get("last name")
+    ee_col   = cols.get("employee cost") or cols.get("employee amount") or cols.get("ee amount")
+    er_col   = cols.get("employer cost") or cols.get("employer amount") or cols.get("er amount")
+    if ssn_col: df[ssn_col] = df[ssn_col].astype(str).str.replace(r"\D","",regex=True).str.zfill(9)
+    if fn_col:  df[fn_col]  = df[fn_col].astype(str).str.title()
+    if ln_col:  df[ln_col]  = df[ln_col].astype(str).str.title()
+    if plan_col: df[plan_col] = df[plan_col].astype(str).str.lower()
+    if ee_col:  df[ee_col]  = df[ee_col].apply(_clean_money)
+    if er_col:  df[er_col]  = df[er_col].apply(_clean_money)
     return df
 
-# --- Duplicate handling helpers ---
+CARRIER_TOKENS = {"sun","life","metlife","voya","unum","guardian","lincoln","principal","anthem"}
+def strip_carrier_prefixes(df):
+    if df is None or df.empty or "Plan Name" not in df.columns: return df
+    out = df.copy()
+    def _strip(p):
+        s = str(p).strip().lower()
+        return " ".join([t for t in s.split() if t not in CARRIER_TOKENS])
+    out["Plan Name"] = out["Plan Name"].astype(str).apply(_strip)
+    return out
 
-def _present_cols(df, wanted):
-    return [c for c in wanted if c in df.columns]
+def normalize_amounts(df: pd.DataFrame, tolerance_cents: int, blank_is_zero: bool=True):
+    if df is None or df.empty: return df
+    out = df.copy()
+    for col in ["Employee Cost","Employer Cost"]:
+        if col in out.columns:
+            if blank_is_zero:
+                out[col] = out[col].replace(["", "-", "--"], 0).fillna(0)
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0 if blank_is_zero else 0)
+            out[col] = (out[col] * 100).round() / 100.0
+            step = max(1, int(tolerance_cents))
+            if step > 0:
+                out[col] = ((out[col] * 100 / step).round() * step / 100.0)
+            out[col] = out[col].round(2)
+    return out
 
-def dedupe_exact(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    """
-    Drop exact duplicates on key fields so 2 identical payroll lines vs 1 BenAdmin line
-    doesn't create a false 'Missing in BenAdmin'.
-    """
-    if df is None or df.empty:
-        return df, 0
-    key_cols = _present_cols(df, ["SSN", "Plan Name", "Employee Cost", "Employer Cost"])
-    if not key_cols:
-        return df, 0
+def dedupe_exact(df: pd.DataFrame) -> tuple[pd.DataFrame,int]:
+    if df is None or df.empty: return df, 0
+    key_cols = [c for c in ["SSN","Plan Name","Employee Cost","Employer Cost"] if c in df.columns]
+    if not key_cols: return df, 0
     before = len(df)
     out = df.drop_duplicates(subset=key_cols, keep="first").reset_index(drop=True)
     return out, before - len(out)
 
-def postfilter_split_amounts(errors_df: pd.DataFrame, summary_df: pd.DataFrame, tolerance_cents: int = 2):
-    if errors_df is None or errors_df.empty:
-        return errors_df, summary_df, 0
-
-    # Only look at Employee Amount mismatches (you can extend for Employer if needed)
-    mask = errors_df["Error Type"].str.contains("Employee Amount Mismatch", case=False, na=False)
-    if not mask.any():
-        return errors_df, summary_df, 0
-
-    tol = max(0, int(tolerance_cents)) / 100.0
-    sub = errors_df[mask].copy()
-
-    # Group by SSN + Plan Name
-    grp_cols = [c for c in ["SSN", "Plan Name"] if c in sub.columns]
-    if not grp_cols:
-        return errors_df, summary_df, 0
-
-    g = (
-        sub.groupby(grp_cols, dropna=False)
-           .agg({
-               "Employee Cost (Payroll)": "first",
-               "Employee Cost (BenAdmin)": "sum"
-           })
-           .reset_index()
-    )
-
-    to_drop_keys = set()
-    for _, r in g.iterrows():
-        a = float(r["Employee Cost (Payroll)"]) if pd.notna(r["Employee Cost (Payroll)"]) else 0.0
-        b = float(r["Employee Cost (BenAdmin)"]) if pd.notna(r["Employee Cost (BenAdmin)"]) else 0.0
-        if abs(a - b) <= tol:
-            to_drop_keys.add(tuple(r[k] for k in grp_cols))
-
-    if not to_drop_keys:
-        return errors_df, summary_df, 0
-
-    keep_idx = []
-    dropped = 0
-    for idx, row in errors_df.iterrows():
-        if not mask.loc[idx]:
-            keep_idx.append(idx)
-            continue
-        key = tuple(row.get(k) for k in grp_cols)
-        if key in to_drop_keys:
-            dropped += 1
-        else:
-            keep_idx.append(idx)
-
-    filtered = errors_df.loc[keep_idx].reset_index(drop=True)
-
-    # Rebuild summary
-    if "Error Type" in filtered.columns:
-        new_summary = filtered.groupby("Error Type", dropna=False).size().reset_index(name="Count")
-        total = pd.DataFrame({"Error Type": ["Total"], "Count": [int(new_summary["Count"].sum())]})
-        new_summary = pd.concat([new_summary, total], ignore_index=True)
-    else:
-        new_summary = summary_df
-
-    return filtered, new_summary, dropped
-
-def aggregate_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    """
-    Collapse duplicates by summing amounts per (SSN, Plan Name).
-    Keeps first/last names from the first occurrence.
-    """
-    if df is None or df.empty:
-        return df, 0
-    req = _present_cols(df, ["SSN", "Plan Name"])
-    if not req:
-        return df, 0
-    # amounts that may exist
-    amt_cols = _present_cols(df, ["Employee Cost", "Employer Cost"])
-    name_cols = _present_cols(df, ["First Name", "Last Name"])
-    group_cols = req
-    before = len(df)
-    agg_dict = {c: "sum" for c in amt_cols}
-    for nc in name_cols:
-        agg_dict[nc] = "first"
-    out = (
-        df.groupby(group_cols, dropna=False, as_index=False)
-          .agg(agg_dict) if agg_dict else df.groupby(group_cols, dropna=False, as_index=False).size()
-    )
-    return out.reset_index(drop=True), before - len(out)
-
-def _unique_keys_count(*dfs: pd.DataFrame) -> int:
-    keys = set()
-    for df in dfs:
-        if df is None or df.empty: continue
-        cols = {c.lower(): c for c in df.columns}
-        ssn_col = cols.get("ssn"); plan_col = cols.get("plan name") or cols.get("plan")
-        if ssn_col and plan_col:
-            ssn_series = df[ssn_col].astype(str).str.replace(r"\D", "", regex=True)
-            plan_series = df[plan_col].astype(str).str.strip().str.lower()
-            for ssn, plan in zip(ssn_series, plan_series):
-                keys.add(f"{ssn}||{plan}")
-        else:
-            keys.update([f"row-{i}-df-{id(df)}" for i in range(len(df))])
-    return len(keys)
-
 def aggregate_by_key_distinct(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Collapse to one row per (SSN, Plan Name).
-    - Sums Employee/Employer costs but ignores duplicate amount lines
-      so identical amounts aren't double-counted.
-    - Keeps First/Last Name from the first occurrence.
-    """
-    if df is None or df.empty:
-        return df
-
+    """Group by SSN+Plan; sum DISTINCT amounts; keep first/last name."""
+    if df is None or df.empty: return df
     cols = df.columns
-    req = [c for c in ["SSN", "Plan Name"] if c in cols]
-    if not req:
-        return df
-
+    req = [c for c in ["SSN","Plan Name"] if c in cols]
+    if not req: return df
     out = df.copy()
-
-    # Drop exact duplicate amount lines before aggregating (prevents doubling)
-    dupe_cols = [c for c in ["SSN", "Plan Name", "Employee Cost", "Employer Cost"] if c in cols]
-    if dupe_cols:
-        out = out.drop_duplicates(subset=dupe_cols, keep="first")
-
-    # Sum DISTINCT amounts in each group (handles 7.62 + 2.54, but not 9.41 + 9.41 twice)
-    def _sum_distinct(series):
-        s = pd.to_numeric(series, errors="coerce").dropna()
-        return s.drop_duplicates().sum()
-
+    dupe_cols = [c for c in ["SSN","Plan Name","Employee Cost","Employer Cost"] if c in cols]
+    if dupe_cols: out = out.drop_duplicates(subset=dupe_cols, keep="first")
+    def _sum_distinct(s):
+        ss = pd.to_numeric(s, errors="coerce").dropna()
+        return ss.drop_duplicates().sum()
     agg = {}
     if "Employee Cost" in cols: agg["Employee Cost"] = _sum_distinct
     if "Employer Cost" in cols: agg["Employer Cost"] = _sum_distinct
-    for k in ["First Name", "Last Name"]:
+    for k in ["First Name","Last Name"]:
         if k in cols: agg[k] = "first"
+    return out.groupby(req, dropna=False, as_index=False).agg(agg).reset_index(drop=True)
 
-    return (
-        out.groupby(req, dropna=False, as_index=False)
-           .agg(agg)
-           .reset_index(drop=True)
-    )
-        
-def _to_float_or_none(v):
-    try:
-        if pd.isna(v): 
-            return None
-        s = str(v).strip()
-        if s == "": 
-            return None
-        return float(s)
-    except Exception:
-        return None
+# Totals engines (noise-tolerant)
+def _tol_ok(a,b,cents:int)->bool:
+    try: aa = 0.0 if pd.isna(a) else float(a); bb = 0.0 if pd.isna(b) else float(b)
+    except: return False
+    return abs(aa-bb) <= max(0,int(cents))/100.0
 
-def _money_eq(a, b, tolerance_cents: int, blank_is_zero: bool) -> bool:
-    A = _to_float_or_none(a)
-    B = _to_float_or_none(b)
-    if A is None and B is None:
-        return True
-    if blank_is_zero:
-        A = 0.0 if A is None else A
-        B = 0.0 if B is None else B
-    if A is None or B is None:
-        return False
-    tol = max(0, int(tolerance_cents)) / 100.0
-    return abs(A - B) <= tol
+def totals_by_key(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["SSN","Plan Name","First Name","Last Name","Employee Cost","Employer Cost"])
+    sums = {c:"sum" for c in ["Employee Cost","Employer Cost"] if c in df.columns}
+    keep = {c:"first" for c in ["First Name","Last Name"] if c in df.columns}
+    agg = {**sums, **keep} if sums else keep
+    return df.groupby(["SSN","Plan Name"], dropna=False, as_index=False).agg(agg).reset_index(drop=True)
 
-def _columns_for_amount(row, base_name: str):
-    """
-    errors_df may label sides variously, e.g.:
-      'Employer Cost (Payroll)', 'Employer Cost (BenAdmin)'
-    Return two values if found; else (None, None).
-    """
-    vals = []
-    for c in row.index:
-        lc = c.lower()
-        if base_name.lower() in lc and "(" in lc and ")" in lc:
-            vals.append(row[c])
-    if len(vals) >= 2:
-        return vals[0], vals[1]
-    return None, None
-
-def postfilter_amount_mismatches(errors_df: pd.DataFrame, summary_df: pd.DataFrame,
-                                 tolerance_cents: int, blank_is_zero: bool):
-    if errors_df is None or errors_df.empty:
-        return errors_df, summary_df, 0
-    keep = []
-    removed = 0
-    for idx, row in errors_df.iterrows():
-        et = str(row.get("Error Type", "")).lower()
-        if "employer cost mismatch" in et:
-            a, b = _columns_for_amount(row, "employer cost")
-            if _money_eq(a, b, tolerance_cents, blank_is_zero):
-                removed += 1
-                continue
-        if "employee cost mismatch" in et:
-            a, b = _columns_for_amount(row, "employee cost")
-            if _money_eq(a, b, tolerance_cents, blank_is_zero):
-                removed += 1
-                continue
-        keep.append(idx)
-    filtered = errors_df.loc[keep].reset_index(drop=True)
-    # rebuild summary from filtered
-    if summary_df is not None and not summary_df.empty and "Error Type" in summary_df.columns:
-        new_summary = (
-            filtered.groupby("Error Type", dropna=False)
-                    .size().reset_index(name="Count")
-            if not filtered.empty else pd.DataFrame({"Error Type": ["Total"], "Count": [0]})
-        )
-        if not filtered.empty:
-            total = pd.DataFrame({"Error Type": ["Total"], "Count": [int(new_summary["Count"].sum())]})
-            new_summary = pd.concat([new_summary, total], ignore_index=True)
+def reconcile_totals_two(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: str, cents: int):
+    A, B = totals_by_key(a), totals_by_key(b)
+    merged = pd.merge(A, B, on=["SSN","Plan Name"], how="outer", suffixes=(f" ({a_name})", f" ({b_name})"))
+    errors = []
+    for _, r in merged.iterrows():
+        in_a = pd.notna(r.get(f"Employee Cost ({a_name})")) or pd.notna(r.get(f"Employer Cost ({a_name})"))
+        in_b = pd.notna(r.get(f"Employee Cost ({b_name})")) or pd.notna(r.get(f"Employer Cost ({b_name})"))
+        if in_a and not in_b:
+            errors.append({"Error Type": f"Missing in {b_name}","SSN": r["SSN"],"First Name": r.get(f"First Name ({a_name})") or r.get(f"First Name ({b_name})"),
+                           "Last Name": r.get(f"Last Name ({a_name})") or r.get(f"Last Name ({b_name})"),"Plan Name": r["Plan Name"]}); continue
+        if in_b and not in_a:
+            errors.append({"Error Type": f"Missing in {a_name}","SSN": r["SSN"],"First Name": r.get(f"First Name ({a_name})") or r.get(f"First Name ({b_name})"),
+                           "Last Name": r.get(f"Last Name ({a_name})") or r.get(f"Last Name ({b_name})"),"Plan Name": r["Plan Name"]}); continue
+        ee_a, ee_b = r.get(f"Employee Cost ({a_name})",0.0), r.get(f"Employee Cost ({b_name})",0.0)
+        er_a, er_b = r.get(f"Employer Cost ({a_name})",0.0), r.get(f"Employer Cost ({b_name})",0.0)
+        if not _tol_ok(ee_a, ee_b, cents):
+            errors.append({"Error Type":"Employee Amount Mismatch","SSN": r["SSN"],"First Name": r.get(f"First Name ({a_name})") or r.get(f"First Name ({b_name})"),
+                           "Last Name": r.get(f"Last Name ({a_name})") or r.get(f"Last Name ({b_name})"),"Plan Name": r["Plan Name"],
+                           f"Employee Cost ({a_name})": ee_a, f"Employee Cost ({b_name})": ee_b})
+        if not _tol_ok(er_a, er_b, cents):
+            errors.append({"Error Type":"Employer Amount Mismatch","SSN": r["SSN"],"First Name": r.get(f"First Name ({a_name})") or r.get(f"First Name ({b_name})"),
+                           "Last Name": r.get(f"Last Name ({a_name})") or r.get(f"Last Name ({b_name})"),"Plan Name": r["Plan Name"],
+                           f"Employer Cost ({a_name})": er_a, f"Employer Cost ({b_name})": er_b})
+    errors_df = pd.DataFrame(errors)
+    if errors_df.empty:
+        summary_df = pd.DataFrame({"Error Type":["Total"],"Count":[0]})
     else:
-        new_summary = summary_df
-    return filtered, new_summary, removed
+        summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
+        summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
+    compared = len(merged)
+    return errors_df, summary_df, compared
 
+def reconcile_totals_three(p: pd.DataFrame, c: pd.DataFrame, b: pd.DataFrame, cents: int):
+    parts = []
+    for (x, xn), (y, yn) in [((p,"Payroll"),(c,"Carrier")), ((p,"Payroll"),(b,"BenAdmin")), ((c,"Carrier"),(b,"BenAdmin"))]:
+        e, s, comp = reconcile_totals_two(x, y, xn, yn, cents)
+        if not e.empty: parts.append(e)
+    errors_df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["Error Type"])
+    if errors_df.empty:
+        summary_df = pd.DataFrame({"Error Type":["Total"],"Count":[0]})
+    else:
+        summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
+        summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
+    compared = 0
+    return errors_df, summary_df, compared
 
-def compute_insights(summary_df: pd.DataFrame, errors_df: pd.DataFrame, compared_lines: int, minutes_per_line: float, hourly_rate: float):
-    total_errors = 0; most_common = "—"; mismatch_pct = 0.0
+# Drilldown: run row-level only for mismatched SSN+Plan keys
+def drilldown_row_level_for_keys(p_df, c_df, b_df, keys, threshold):
+    if not keys: return pd.DataFrame()
+    def _filter(df):
+        if df is None or df.empty: return df
+        return df[df.apply(lambda r: (str(r.get("SSN")), str(r.get("Plan Name"))) in keys, axis=1)]
+    p2, c2, b2 = _filter(p_df), _filter(c_df), _filter(b_df)
+    # choose correct two/three reconcile
+    if p2 is not None and c2 is not None and b2 is not None and not p2.empty and not c2.empty and not b2.empty:
+        e, _ = reconcile_three(p2, c2, b2, plan_match_threshold=threshold)
+        return e
+    # else try pairs prioritizing payroll
+    parts = []
+    if p2 is not None and c2 is not None and not p2.empty and not c2.empty:
+        e, _ = reconcile_two(p2, c2, "Payroll", "Carrier", plan_match_threshold=threshold)
+        parts.append(e)
+    if p2 is not None and b2 is not None and not p2.empty and not b2.empty:
+        e, _ = reconcile_two(p2, b2, "Payroll", "BenAdmin", plan_match_threshold=threshold)
+        parts.append(e)
+    if c2 is not None and b2 is not None and not c2.empty and not b2.empty:
+        e, _ = reconcile_two(c2, b2, "Carrier", "BenAdmin", plan_match_threshold=threshold)
+        parts.append(e)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+# Insights
+def compute_insights(summary_df, errors_df, compared_lines, minutes_per_line, hourly_rate):
+    total = 0; most = "—"; mismatch_pct = 0.0
     if summary_df is not None and not summary_df.empty:
-        for _, r in summary_df.iterrows():
-            if str(r["Error Type"]).lower() == "total": total_errors = int(r["Count"]); break
-        filt = summary_df[summary_df["Error Type"].str.lower() != "total"] if "Error Type" in summary_df.columns else summary_df
-        if not filt.empty:
-            top = filt.sort_values("Count", ascending=False).iloc[0]
-            most_common = f"{top['Error Type']} ({int(top['Count'])})"
+        tmp = summary_df[summary_df["Error Type"].str.lower()!="total"] if "Error Type" in summary_df.columns else summary_df
+        if not tmp.empty:
+            top = tmp.sort_values("Count", ascending=False).iloc[0]
+            most = f"{top['Error Type']} ({int(top['Count'])})"
+        total = int(summary_df[summary_df["Error Type"].str.lower()=="total"]["Count"].sum() or 0)
     if errors_df is not None and not errors_df.empty and compared_lines:
-        mismatch_count = (errors_df["Error Type"] == "Plan Name Mismatch").sum()
-        mismatch_pct = mismatch_count / compared_lines
-
-    error_rate = (total_errors / max(1, compared_lines))
+        mismatch_pct = (errors_df["Error Type"].str.contains("Plan Name Mismatch", na=False)).sum() / max(1,compared_lines)
+    error_rate = total / max(1, compared_lines)
     minutes_saved = compared_lines * minutes_per_line
     hours_saved = minutes_saved / 60.0
     dollars_saved = hours_saved * hourly_rate
-
-    return {"total_errors": total_errors, "most_common": most_common, "mismatch_pct": mismatch_pct,
-            "error_rate": error_rate, "compared_lines": compared_lines, "minutes_saved": minutes_saved,
-            "hours_saved": hours_saved, "dollars_saved": dollars_saved}
+    return {"total_errors":total, "most_common":most, "mismatch_pct":mismatch_pct,
+            "error_rate":error_rate, "compared_lines":compared_lines,
+            "minutes_saved":minutes_saved,"hours_saved":hours_saved,"dollars_saved":dollars_saved}
 
 def render_quick_insights(ins):
-    m1, m2, m3, m4, m5 = st.columns(5)
-    with m1: st.metric("Lines Reconciled", f"{ins['compared_lines']:,}")
-    with m2: st.metric("Error Rate", f"{ins['error_rate']:.1%}", help="Total errors / lines compared")
-    with m3: st.metric("Plan Mismatch %", f"{ins['mismatch_pct']:.1%}")
-    with m4: st.metric("Most Common Error", ins["most_common"])
-    with m5: st.metric("Time Saved (hrs)", f"{ins['hours_saved']:,.1f}")
+    a,b,c,d,e = st.columns(5)
+    with a: st.metric("Lines Reconciled", f"{ins['compared_lines']:,}")
+    with b: st.metric("Error Rate", f"{ins['error_rate']:.1%}")
+    with c: st.metric("Plan Mismatch %", f"{ins['mismatch_pct']:.1%}")
+    with d: st.metric("Most Common Error", ins["most_common"])
+    with e: st.metric("Time Saved (hrs)", f"{ins['hours_saved']:,.1f}")
     st.markdown(
         f'<div class="impact">{ins["compared_lines"]:,} records • {ins["error_rate"]:.1%} error rate • '
         f'saved {ins["hours_saved"]:,.1f} hrs (~${ins["dollars_saved"]:,.0f})</div>',
         unsafe_allow_html=True,
     )
-    st.caption("Assumptions configurable in Options (mins/line, hourly $).")
 
 def download_insights_button(ins, mode, group_name, period):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -492,56 +342,32 @@ def download_insights_button(ins, mode, group_name, period):
         "Generated by IvyRecon"
     ]
     data = "\n".join(lines).encode("utf-8")
-    st.download_button(
-        "Download Insights (.txt)",
-        data=data,
-        file_name=f"ivyrecon_insights_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-        mime="text/plain",
-    )
-
-def build_insights_blurb(ins, mode, group_name, period):
-    return (
-        f"IvyRecon — Reconciliation Insights • "
-        f"{ins['compared_lines']:,} lines • {ins['error_rate']:.1%} error rate • "
-        f"top issue: {ins['most_common']} • "
-        f"saved ~{ins['hours_saved']:.1f} hrs (~${ins['dollars_saved']:,.0f}) • "
-        f"Mode: {mode} • Group: {group_name or '-'} • Period: {period or '-'}"
-    )
+    st.download_button("Download Insights (.txt)", data=data,
+        file_name=f"ivyrecon_insights_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt", mime="text/plain")
 
 def copy_to_clipboard_button(label: str, text: str):
     text_js = json.dumps(text)
     components.html(
-        f"""
-        <button onclick='navigator.clipboard.writeText({text_js});'
+        f"""<button onclick='navigator.clipboard.writeText({text_js});'
                 style="background:#18CCAA;color:#0F2A37;border:0;padding:8px 12px;
-                       border-radius:12px;font-weight:600;cursor:pointer;">
-            {label}
-        </button>
-        """,
+                       border-radius:12px;font-weight:600;cursor:pointer;">{label}</button>""",
         height=46,
     )
 
 # ---------------- Tabs ----------------
 st.title("IvyRecon")
 st.caption("Modern, tech-forward reconciliation for Payroll • Carrier • BenAdmin")
-
-run_tab, dashboard_tab, settings_tab, help_tab = st.tabs(
-    ["Run Reconciliation", "Summary Dashboard", "Settings", "Help & Formatting"]
-)
+run_tab, dashboard_tab, settings_tab, help_tab = st.tabs(["Run Reconciliation","Summary Dashboard","Settings","Help & Formatting"])
 
 # ---------- SETTINGS: Alias Manager ----------
 with settings_tab:
     st.markdown("### Alias Manager")
     st.caption("Control plan name synonyms without code. Format: canonical → aliases list.")
     current = st.session_state["aliases"]
-
-    colA, colB = st.columns(2)
+    colA,colB = st.columns(2)
     with colA:
         st.markdown("**Current Aliases (JSON)**")
-        alias_text = st.text_area("",
-            value=json.dumps(current, indent=2),
-            height=260, label_visibility="collapsed"
-        )
+        alias_text = st.text_area("", value=json.dumps(current, indent=2), height=260, label_visibility="collapsed")
         if st.button("Save Aliases"):
             try:
                 user_dict = json.loads(alias_text)
@@ -549,14 +375,8 @@ with settings_tab:
                 st.success("Aliases saved for this session.")
             except Exception as e:
                 st.error(f"Invalid JSON: {e}")
-
-        st.download_button(
-            "Download Aliases (.json)",
-            data=json.dumps(st.session_state["aliases"], indent=2).encode("utf-8"),
-            file_name="ivyrecon_plan_aliases.json",
-            mime="application/json",
-        )
-
+        st.download_button("Download Aliases (.json)", data=json.dumps(st.session_state["aliases"], indent=2).encode("utf-8"),
+                           file_name="ivyrecon_plan_aliases.json", mime="application/json")
     with colB:
         st.markdown("**Load Aliases (.json)**")
         uploaded = st.file_uploader("Upload aliases JSON", type=["json"], key="alias_json")
@@ -567,339 +387,176 @@ with settings_tab:
                 st.success("Aliases loaded for this session.")
             except Exception as e:
                 st.error(f"Invalid file: {e}")
-
         st.markdown("**Tips**")
         st.write("- Canonical names should be lowercase, e.g., `short term disability`.")
         st.write("- Put aliases like `std`, `short-term disability` under that canonical.")
 
-# ---------- RUN: Column Mapper + Reconcile ----------
+# ---------- RUN: Smart Reconciliation ----------
 with run_tab:
-    # Uploads + Options in cards
-    up_col, opt_col = st.columns([2, 1])
+    up_col, opt_col = st.columns([2,1])
     with up_col:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("### Upload Files")
-        u1, u2, u3 = st.columns(3)
-        with u1:
-            payroll_file = st.file_uploader("Payroll (CSV/XLSX)", type=["csv", "xlsx"], key=f"payroll_{st.session_state.upl_ver}")
-        with u2:
-            carrier_file = st.file_uploader("Carrier (CSV/XLSX)", type=["csv", "xlsx"], key=f"carrier_{st.session_state.upl_ver}")
-        with u3:
-            benadmin_file = st.file_uploader("BenAdmin (CSV/XLSX)", type=["csv", "xlsx"], key=f"benadmin_{st.session_state.upl_ver}")
+        u1,u2,u3 = st.columns(3)
+        with u1: payroll_file  = st.file_uploader("Payroll (CSV/XLSX)",  type=["csv","xlsx"], key=f"pay_{st.session_state.upl_ver}")
+        with u2: carrier_file  = st.file_uploader("Carrier (CSV/XLSX)",  type=["csv","xlsx"], key=f"car_{st.session_state.upl_ver}")
+        with u3: benadmin_file = st.file_uploader("BenAdmin (CSV/XLSX)", type=["csv","xlsx"], key=f"ben_{st.session_state.upl_ver}")
         st.caption("Required Columns: SSN, First Name, Last Name, Plan Name, Employee Cost, Employer Cost")
         st.markdown('</div>', unsafe_allow_html=True)
 
     with opt_col:
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("### Options")
-        threshold = st.slider("Plan Name Match Threshold", 0.5, 1.0, 0.90, 0.01, help="Lower = more tolerant fuzzy matches")
-        group_name = st.text_input("Group Name (export header)", value="")
-        period = st.text_input("Reporting Period", value="")
-        st.markdown("**ROI Assumptions**")
-        minutes_per_line = st.slider("Manual mins per line", 0.5, 3.0, 1.2, 0.1)
-        hourly_rate = st.slider("Hourly cost ($)", 15, 150, 40, 5)
-
-        amount_match_mode = st.selectbox(
-            "Amount comparison",
-            ["Per-line (default)", "Aggregate by SSN + Plan (sum)"],
-            index=0,
-            help="Use aggregate when one system splits premiums across multiple rows."
-        )
-        # right after hourly_rate slider
-        treat_blank_as_zero = st.checkbox(
-            "Treat blank amounts as $0.00",
-            value=True,
-            help="If checked, empty Employer/Employee Cost cells are treated as zero."
-        )
-
-        amount_tolerance_cents = st.slider(
-            "Amount tolerance (cents)",
-            0, 25, 1, 1,
-            help="Ignore tiny differences due to rounding (e.g., 1 = $0.01)."
-        )
-
-        # --- NEW: Duplicate handling selectbox ---
-        dup_mode = st.selectbox(
-        "Duplicate handling",
-        ["Ignore exact duplicates (recommended)", "Aggregate duplicates (sum amounts)", "Keep all (strict)"],
-        index=0,
-        help="How to treat multiple identical lines per SSN/Plan."
-    )
-        c1, c2 = st.columns(2)
-        with c1:
-            run_clicked = st.button("Run Reconciliation", type="primary")
-        with c2:
-            if st.button("Clear All"):
-                st.session_state.upl_ver += 1
-                st.session_state.ran = False
-                st.session_state.use_demo = False
-                st.rerun()
+        st.markdown("### Details")
+        group_name = st.text_input("Group Name", value="")
+        period     = st.text_input("Reporting Period", value="")
+        run_clicked = st.button("Run Reconciliation", type="primary", use_container_width=True)
+        with st.expander("Advanced (optional)"):
+            st.caption("Defaults are battle-tested. Tweak only if needed.")
+            threshold = st.slider("Plan Name Match Threshold", 0.5, 1.0, 0.90, 0.01)
+            treat_blank_as_zero = st.checkbox("Treat blank amounts as $0.00", value=True)
+            amount_tolerance_cents = st.slider("Amount tolerance (cents)", 0, 25, 2, 1)
+            minutes_per_line = st.slider("Manual mins per line (for ROI)", 0.5, 3.0, 1.2, 0.1)
+            hourly_rate = st.slider("Hourly cost ($)", 15, 150, 40, 5)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # Load data
-    p_df = load_any(payroll_file)
-    c_df = load_any(carrier_file)
-    b_df = load_any(benadmin_file)
+    # Load & preview before run
+    p_df = standardize_df(load_any(payroll_file))
+    c_df = standardize_df(load_any(carrier_file))
+    b_df = standardize_df(load_any(benadmin_file))
 
-    # Standardize all
-    p_df = standardize_df(p_df)
-    c_df = standardize_df(c_df)
-    b_df = standardize_df(b_df)
-
-
-    # Column Mapper UI per file (expander)
-    def map_columns_ui(df: pd.DataFrame, label: str):
-        if df is None or df.empty:
-            st.info(f"No {label} file uploaded."); return None, {}
-        st.markdown(f"**{label} columns detected:** {', '.join(df.columns.map(str))}")
-        with st.expander(f"Map {label} columns (if headers differ)"):
-            cols_lower = {c.lower(): c for c in df.columns}
-            mapping = {}
-            for req in REQUIRED:
-                # guess by lowercase exact or fuzzy contains
-                guess = cols_lower.get(req.lower())
-                if not guess:
-                    # simple contains guess
-                    for c in df.columns:
-                        if req.lower().replace(" ", "") in str(c).lower().replace(" ", ""):
-                            guess = c; break
-                mapping[req] = st.selectbox(f"{req} →", options=["-- choose --", *list(df.columns)], index=(list(df.columns).index(guess) + 1) if guess in df.columns else 0)
-            if st.button(f"Apply Mapping for {label}"):
-                # build rename dict
-                rename = {}
-                for req, chosen in mapping.items():
-                    if chosen and chosen != "-- choose --":
-                        rename[chosen] = req
-                new_df = df.rename(columns=rename)
-                # warn about missing
-                missing = [req for req in REQUIRED if req not in new_df.columns]
-                if missing:
-                    st.warning(f"{label}: missing required columns after mapping → {', '.join(missing)}")
-                else:
-                    st.success(f"{label}: mapping applied.")
-                return new_df, mapping
-        return df, {}
-
-    # Show previews only before run
-    if not st.session_state.ran:
+    if not run_clicked:
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("### Previews & Column Mapper")
-        pcol, ccol, bcol = st.columns(3)
+        st.markdown("### Previews")
+        pcol,ccol,bcol = st.columns(3)
         with pcol:
-            st.markdown("#### Payroll")
-            p_df, _ = map_columns_ui(p_df, "Payroll")
-            st.dataframe((p_df.head(12) if p_df is not None else pd.DataFrame()), use_container_width=True)
-            if p_df is not None: quick_stats(p_df, "Payroll")
+            st.markdown("#### Payroll");   st.dataframe((p_df.head(12) if p_df is not None else pd.DataFrame()), use_container_width=True); quick_stats(p_df, "Payroll")
         with ccol:
-            st.markdown("#### Carrier")
-            c_df, _ = map_columns_ui(c_df, "Carrier")
-            st.dataframe((c_df.head(12) if c_df is not None else pd.DataFrame()), use_container_width=True)
-            if c_df is not None: quick_stats(c_df, "Carrier")
+            st.markdown("#### Carrier");   st.dataframe((c_df.head(12) if c_df is not None else pd.DataFrame()), use_container_width=True); quick_stats(c_df, "Carrier")
         with bcol:
-            st.markdown("#### BenAdmin")
-            b_df, _ = map_columns_ui(b_df, "BenAdmin")
-            st.dataframe((b_df.head(12) if b_df is not None else pd.DataFrame()), use_container_width=True)
-            if b_df is not None: quick_stats(b_df, "BenAdmin")
+            st.markdown("#### BenAdmin");  st.dataframe((b_df.head(12) if b_df is not None else pd.DataFrame()), use_container_width=True); quick_stats(b_df, "BenAdmin")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown("### Results")
+    st.markdown('<div class="card">', unsafe_allow_html=True); st.markdown("### Results")
 
     if run_clicked:
-        st.session_state.ran = True
-
-    if st.session_state.ran:
         try:
-            # 1) STANDARDIZE
-            p_df = standardize_df(p_df)
-            c_df = standardize_df(c_df)
-            b_df = standardize_df(b_df)
-
-            # 2) STRIP CARRIER PREFIXES (optional)
-            def strip_carrier_prefixes(df):
-                if df is None or df.empty or "Plan Name" not in df.columns:
-                    return df
-                CARRIER_TOKENS = {"sun", "life", "metlife", "voya", "unum", "guardian", "lincoln", "principal", "anthem"}
-                def _strip(p):
-                    s = str(p).strip().lower()
-                    parts = [t for t in s.split() if t not in CARRIER_TOKENS]
-                    return " ".join(parts)
-                out = df.copy()
-                out["Plan Name"] = out["Plan Name"].astype(str).apply(_strip)
-                return out
-
-            p_df = strip_carrier_prefixes(p_df)
-            c_df = strip_carrier_prefixes(c_df)
-            b_df = strip_carrier_prefixes(b_df)
-
-            # 3) APPLY ALIASES (ASSIGN BACK)
+            # Smart pipeline (no knobs)
+            # 1) strip vendor prefixes
+            p_df = strip_carrier_prefixes(p_df); c_df = strip_carrier_prefixes(c_df); b_df = strip_carrier_prefixes(b_df)
+            # 2) apply aliases (assign!)
             aliases = st.session_state["aliases"]
             p_df = apply_aliases_to_df(p_df, "Plan Name", aliases, threshold=threshold) if p_df is not None else None
             c_df = apply_aliases_to_df(c_df, "Plan Name", aliases, threshold=threshold) if c_df is not None else None
             b_df = apply_aliases_to_df(b_df, "Plan Name", aliases, threshold=threshold) if b_df is not None else None
-
-            # tiny stat to confirm consolidation
-            def _canon_stats(df, label):
-                if df is not None and "Plan Name" in df.columns:
-                    st.caption(f"{label}: {df['Plan Name'].nunique()} canonical plan names after aliases")
-            _canon_stats(p_df, "Payroll"); _canon_stats(c_df, "Carrier"); _canon_stats(b_df, "BenAdmin")
-
-            # 4) NORMALIZE AMOUNTS (blank/'-' → 0, tolerance)
-            def _normalize_amounts(df: pd.DataFrame):
-                if df is None or df.empty:
-                    return df
-                out = df.copy()
-                for col in ["Employee Cost", "Employer Cost"]:
-                    if col in out.columns:
-                        if treat_blank_as_zero:
-                            out[col] = out[col].replace(["", "-", "--"], 0).fillna(0)
-                        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0 if treat_blank_as_zero else 0)
-                        out[col] = (out[col] * 100).round() / 100.0  # standard cents
-                        step = max(1, amount_tolerance_cents)
-                        if amount_tolerance_cents > 0:
-                            out[col] = ((out[col] * 100 / step).round() * step / 100.0)
-                        out[col] = out[col].round(2)
-                return out
-
-            p_df = _normalize_amounts(p_df)
-            c_df = _normalize_amounts(c_df)
-            b_df = _normalize_amounts(b_df)
-
-            # 5) DUPLICATE HANDLING
+            # 3) amounts normalization
+            p_df = normalize_amounts(p_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
+            c_df = normalize_amounts(c_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
+            b_df = normalize_amounts(b_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
+            # 4) ignore exact dups
             dup_notes = []
+            def _dedupe(df,label):
+                nd, removed = dedupe_exact(df)
+                if removed: dup_notes.append(f"{label}: removed {removed} exact duplicate row(s)")
+                return nd
+            p_df = _dedupe(p_df,"Payroll"); c_df = _dedupe(c_df,"Carrier"); b_df = _dedupe(b_df,"BenAdmin")
+            # 5) aggregate by SSN+Plan (distinct amounts) to neutralize split lines
+            p_tot = aggregate_by_key_distinct(p_df); c_tot = aggregate_by_key_distinct(c_df); b_tot = aggregate_by_key_distinct(b_df)
 
-            def _apply_dup_mode(df, label):
-                if df is None or df.empty:
-                    return df
-                if dup_mode == "Ignore exact duplicates (recommended)":
-                    new_df, removed = dedupe_exact(df)
-                    if removed: dup_notes.append(f"{label}: removed {removed} exact duplicate row(s)")
-                    return new_df
-                elif dup_mode == "Aggregate duplicates (sum amounts)":
-                    new_df, removed = aggregate_duplicates(df)
-                    if removed: dup_notes.append(f"{label}: aggregated {removed} row(s) into keys")
-                    return new_df
-                return df
-
-            p_df = _apply_dup_mode(p_df, "Payroll")
-            c_df = _apply_dup_mode(c_df, "Carrier")
-            b_df = _apply_dup_mode(b_df, "BenAdmin")
-
-            # 6) (OPTIONAL) AGGREGATE BY SSN+PLAN — NOW that aliases/amounts/dups are clean
-            if amount_match_mode == "Aggregate by SSN + Plan (sum)":
-                p_df = aggregate_by_key_distinct(p_df)
-                c_df = aggregate_by_key_distinct(c_df)
-                b_df = aggregate_by_key_distinct(b_df)
-                st.caption("Comparing aggregated totals per SSN + Plan (duplicate amount lines ignored).")
-
-            # 7) RECONCILE (ONLY ONCE)
-            if p_df is not None and c_df is not None and b_df is not None:
-                errors_df, summary_df = reconcile_three(p_df, c_df, b_df, plan_match_threshold=threshold)
-                mode = "Three-way (Payroll vs Carrier vs BenAdmin)"
-                compared_lines = _unique_keys_count(p_df, c_df, b_df)
-            elif p_df is not None and c_df is not None:
-                errors_df, summary_df = reconcile_two(p_df, c_df, "Payroll", "Carrier", plan_match_threshold=threshold)
-                mode = "Two-way (Payroll vs Carrier)"
-                compared_lines = _unique_keys_count(p_df, c_df)
-            elif p_df is not None and b_df is not None:
-                errors_df, summary_df = reconcile_two(p_df, b_df, "Payroll", "BenAdmin", plan_match_threshold=threshold)
-                mode = "Two-way (Payroll vs BenAdmin)"
-                compared_lines = _unique_keys_count(p_df, b_df)
-            elif c_df is not None and b_df is not None:
-                errors_df, summary_df = reconcile_two(c_df, b_df, "Carrier", "BenAdmin", plan_match_threshold=threshold)
-                mode = "Two-way (Carrier vs BenAdmin)"
-                compared_lines = _unique_keys_count(c_df, b_df)
+            # 6) totals engine
+            if p_tot is not None and c_tot is not None and b_tot is not None and not p_tot.empty and not c_tot.empty and not b_tot.empty:
+                errors_df, summary_df, _ = reconcile_totals_three(p_tot, c_tot, b_tot, amount_tolerance_cents)
+                mode = "Smart totals (Payroll vs Carrier vs BenAdmin)"
+                compared_lines = len(pd.concat([p_tot, c_tot, b_tot], ignore_index=True))
+            elif p_tot is not None and c_tot is not None and not p_tot.empty and not c_tot.empty:
+                errors_df, summary_df, compared_lines = reconcile_totals_two(p_tot, c_tot, "Payroll", "Carrier", amount_tolerance_cents)
+                mode = "Smart totals (Payroll vs Carrier)"
+            elif p_tot is not None and b_tot is not None and not p_tot.empty and not b_tot.empty:
+                errors_df, summary_df, compared_lines = reconcile_totals_two(p_tot, b_tot, "Payroll", "BenAdmin", amount_tolerance_cents)
+                mode = "Smart totals (Payroll vs BenAdmin)"
+            elif c_tot is not None and b_tot is not None and not c_tot.empty and not b_tot.empty:
+                errors_df, summary_df, compared_lines = reconcile_totals_two(c_tot, b_tot, "Carrier", "BenAdmin", amount_tolerance_cents)
+                mode = "Smart totals (Carrier vs BenAdmin)"
             else:
-                st.warning("Please upload at least two files to reconcile.")
-                st.markdown('</div>', unsafe_allow_html=True)
-                st.stop()
+                st.warning("Please upload at least two files to reconcile."); st.markdown('</div>', unsafe_allow_html=True); st.stop()
+
+            # 7) drilldown only where totals mismatched (replace those with row-level detail)
+            if not errors_df.empty:
+                mismatch_mask = errors_df["Error Type"].str.contains("Amount Mismatch", case=False, na=False)
+                keys = set(zip(errors_df.loc[mismatch_mask, "SSN"], errors_df.loc[mismatch_mask, "Plan Name"]))
+                if keys:
+                    row_detail = drilldown_row_level_for_keys(p_df, c_df, b_df, keys, threshold)
+                    if row_detail is not None and not row_detail.empty:
+                        # drop the coarse totals mismatches for those keys, keep missings & others
+                        keep_idx = []
+                        for i, r in errors_df.iterrows():
+                            if mismatch_mask.iloc[i] and (str(r["SSN"]), str(r["Plan Name"])) in keys:
+                                continue
+                            keep_idx.append(i)
+                        errors_df = pd.concat([errors_df.iloc[keep_idx].reset_index(drop=True), row_detail], ignore_index=True)
+                        # rebuild summary
+                        if not errors_df.empty:
+                            summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
+                            summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
 
             st.success(f"Completed: {mode}")
+            if dup_notes: st.caption(" • ".join(dup_notes))
 
-            # Safety net: collapse split-amount mismatches where totals match within tolerance
-            errors_df, summary_df, removed_splits = postfilter_split_amounts(
-                errors_df, summary_df, tolerance_cents=amount_tolerance_cents
-            )
-            if removed_splits:
-                st.caption(f"Collapsed {removed_splits} split-amount mismatches where BenAdmin totals matched Payroll within {amount_tolerance_cents}¢.")
-
-            # After st.success(f"Completed: {mode}") and before rendering results:
-            errors_df, summary_df, removed_eq = postfilter_amount_mismatches(
-                errors_df, summary_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero
-            )
-            if removed_eq:
-                st.caption(f"Ignored {removed_eq} amount mismatches as equivalent (blank↔$0 within {amount_tolerance_cents}¢).")
-
-
-            with st.expander("🔎 Debug Investigator: check an employee/plan across files"):
-                q_ssn = st.text_input("Enter SSN (9 digits or last 4 ok)")
-                q_plan = st.text_input("Optional: Plan contains (e.g., accident)")
-                if st.button("Find Records"):
-                    def _filter(df):
-                        if df is None or df.empty: return df
-                        cols = {c.lower(): c for c in df.columns}
-                        ssn_col = cols.get("ssn")
-                        plan_col = cols.get("plan name") or cols.get("plan")
-                        out = df
-                        if q_ssn and ssn_col:
-                            s = "".join(ch for ch in str(q_ssn).strip() if ch.isdigit())
-                            if len(s) == 4:
-                                out = out[out[ssn_col].astype(str).str[-4:] == s]
-                            elif len(s) == 9:
-                                out = out[out[ssn_col].astype(str) == s]
-                        if q_plan and plan_col:
-                            out = out[out[plan_col].astype(str).str.contains(q_plan.strip().lower(), na=False)]
-                        return out
-
-                    st.markdown("**Payroll match**")
-                    st.dataframe(_filter(p_df), use_container_width=True, height=200)
-                    st.markdown("**Carrier match**")
-                    st.dataframe(_filter(c_df), use_container_width=True, height=200)
-                    st.markdown("**BenAdmin match**")
-                    st.dataframe(_filter(b_df), use_container_width=True, height=200)
-
+            # Insights
             ins = compute_insights(summary_df, errors_df, compared_lines, minutes_per_line, hourly_rate)
-            # Insights block
-            m1, m2 = st.columns([2, 1])
-            with m1:
-                # metrics + impact line
-                render_quick_insights(ins)
-            with m2:
-                blurb = (
-                    f"{ins['compared_lines']:,} lines • {ins['error_rate']:.1%} errors • "
-                    f"saved ~{ins['hours_saved']:.1f} hrs (~${ins['dollars_saved']:,.0f})"
-                )
-                st.caption("Sales blurb (preview)")
-                st.text_area("", blurb, height=60, label_visibility="collapsed", disabled=True)
+            a,b = st.columns([2,1])
+            with a: render_quick_insights(ins)
+            with b:
+                blurb = f"{ins['compared_lines']:,} lines • {ins['error_rate']:.1%} errors • saved ~{ins['hours_saved']:.1f} hrs (~${ins['dollars_saved']:,.0f})"
+                st.caption("Sales blurb"); st.text_area("", blurb, height=60, label_visibility="collapsed", disabled=True)
 
             render_error_chips(summary_df)
 
-            left, right = st.columns([1, 2])
-            with left:
+            # Results tables
+            L,R = st.columns([1,2])
+            with L:
                 st.markdown("**Summary**")
                 st.dataframe(summary_df, use_container_width=True)
-            with right:
+            with R:
                 st.markdown("**Errors**")
                 if errors_df is not None and not errors_df.empty:
                     st.dataframe(style_errors(errors_df), use_container_width=True, height=520)
                 else:
                     st.info("No errors found.")
 
-            # Exports + Copy Insights
+            # Debug Investigator
+            with st.expander("🔎 Debug Investigator: check an employee/plan across files"):
+                q_ssn  = st.text_input("Enter SSN (9 digits or last 4 ok)")
+                q_plan = st.text_input("Optional: Plan contains (e.g., accident)")
+                if st.button("Find Records"):
+                    def _filter(df):
+                        if df is None or df.empty: return df
+                        cols = {c.lower(): c for c in df.columns}
+                        ssn_col = cols.get("ssn"); plan_col = cols.get("plan name") or cols.get("plan")
+                        out = df
+                        if q_ssn and ssn_col:
+                            s = "".join(ch for ch in str(q_ssn).strip() if ch.isdigit())
+                            if len(s)==4: out = out[out[ssn_col].astype(str).str[-4:]==s]
+                            elif len(s)==9: out = out[out[ssn_col].astype(str)==s]
+                        if q_plan and plan_col:
+                            out = out[out[plan_col].astype(str).str.contains(q_plan.strip().lower(), na=False)]
+                        return out
+                    st.markdown("**Payroll**");  st.dataframe(_filter(p_df), use_container_width=True, height=200)
+                    st.markdown("**Carrier**");  st.dataframe(_filter(c_df), use_container_width=True, height=200)
+                    st.markdown("**BenAdmin**"); st.dataframe(_filter(b_df), use_container_width=True, height=200)
+
+            # Exports
             st.markdown("#### Export")
             xlsx = export_errors_multitab(errors_df, summary_df, group_name=group_name, period=period)
-            c1, c2, c3 = st.columns(3)
+            c1,c2,c3 = st.columns(3)
             with c1:
-                st.download_button(
-                    "Download Error Report (Excel)",
-                    data=xlsx,
+                st.download_button("Download Error Report (Excel)", data=xlsx,
                     file_name=f"ivyrecon_errors_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             with c2:
                 download_insights_button(ins, mode, group_name, period)
             with c3:
-                copy_to_clipboard_button("Copy Insights", build_insights_blurb(ins, mode, group_name, period))
+                copy_to_clipboard_button("Copy Insights",
+                    f"{ins['compared_lines']:,} lines • {ins['error_rate']:.1%} errors • saved ~{ins['hours_saved']:.1f} hrs (~${ins['dollars_saved']:,.0f})")
                 st.caption("Copied")
 
         except Exception as e:
@@ -926,11 +583,12 @@ with help_tab:
 
         **File types**: CSV or Excel (first sheet).
 
-        **Plan Name matching**: IvyRecon uses alias normalization + fuzzy matching. Adjust the threshold in Options.
+        **Plan Name matching**: IvyRecon auto-applies aliases + fuzzy normalization. Threshold is in Advanced.
 
         **Exports**: Multi-tab Excel includes Summary, All Errors, and one sheet per error type — branded to IvyRecon.
         """
     )
+
 
 
 
