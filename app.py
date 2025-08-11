@@ -425,6 +425,18 @@ with run_tab:
         st.markdown("**ROI Assumptions**")
         minutes_per_line = st.slider("Manual mins per line", 0.5, 3.0, 1.2, 0.1)
         hourly_rate = st.slider("Hourly cost ($)", 15, 150, 40, 5)
+        # right after hourly_rate slider
+        treat_blank_as_zero = st.checkbox(
+            "Treat blank amounts as $0.00",
+            value=True,
+            help="If checked, empty Employer/Employee Cost cells are treated as zero."
+        )
+
+        amount_tolerance_cents = st.slider(
+            "Amount tolerance (cents)",
+            0, 25, 1, 1,
+            help="Ignore tiny differences due to rounding (e.g., 1 = $0.01)."
+        )
 
         # --- NEW: Duplicate handling selectbox ---
         dup_mode = st.selectbox(
@@ -523,6 +535,26 @@ with run_tab:
             for df in (p_df, c_df, b_df):
                 if df is not None and not df.empty and "Plan Name" in df.columns:
                     apply_aliases_to_df(df, "Plan Name", aliases, threshold=threshold)
+
+            def _normalize_amounts(df: pd.DataFrame):
+                if df is None or df.empty:
+                    return df
+                for col in ["Employee Cost", "Employer Cost"]:
+                    if col in df.columns:
+                        if treat_blank_as_zero:  # from the UI checkbox
+                            df[col] = df[col].fillna(0.0)
+                        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+                        # snap to cents and apply tolerance
+                        df[col] = (df[col] * 100).round() / 100.0
+                        if amount_tolerance_cents > 0:
+                            step = max(1, amount_tolerance_cents)
+                            df[col] = ((df[col] * 100 / step).round() * step / 100.0)
+                        df[col] = df[col].round(2)
+                return df
+
+            p_df = _normalize_amounts(p_df)
+            c_df = _normalize_amounts(c_df)
+            b_df = _normalize_amounts(b_df)        
 
             dup_notes = []
 
