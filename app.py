@@ -207,6 +207,48 @@ def standardize_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+# --- Duplicate handling helpers ---
+
+def _present_cols(df, wanted):
+    return [c for c in wanted if c in df.columns]
+
+def dedupe_exact(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """
+    Drop exact duplicates on key fields so 2 identical payroll lines vs 1 BenAdmin line
+    doesn't create a false 'Missing in BenAdmin'.
+    """
+    if df is None or df.empty:
+        return df, 0
+    key_cols = _present_cols(df, ["SSN", "Plan Name", "Employee Cost", "Employer Cost"])
+    if not key_cols:
+        return df, 0
+    before = len(df)
+    out = df.drop_duplicates(subset=key_cols, keep="first").reset_index(drop=True)
+    return out, before - len(out)
+
+def aggregate_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """
+    Collapse duplicates by summing amounts per (SSN, Plan Name).
+    Keeps first/last names from the first occurrence.
+    """
+    if df is None or df.empty:
+        return df, 0
+    req = _present_cols(df, ["SSN", "Plan Name"])
+    if not req:
+        return df, 0
+    # amounts that may exist
+    amt_cols = _present_cols(df, ["Employee Cost", "Employer Cost"])
+    name_cols = _present_cols(df, ["First Name", "Last Name"])
+    group_cols = req
+    before = len(df)
+    agg_dict = {c: "sum" for c in amt_cols}
+    for nc in name_cols:
+        agg_dict[nc] = "first"
+    out = (
+        df.groupby(group_cols, dropna=False, as_index=False)
+          .agg(agg_dict) if agg_dict else df.groupby(group_cols, dropna=False, as_index=False).size()
+    )
+    return out.reset_index(drop=True), before - len(out)
 
 def _unique_keys_count(*dfs: pd.DataFrame) -> int:
     keys = set()
@@ -383,6 +425,14 @@ with run_tab:
         st.markdown("**ROI Assumptions**")
         minutes_per_line = st.slider("Manual mins per line", 0.5, 3.0, 1.2, 0.1)
         hourly_rate = st.slider("Hourly cost ($)", 15, 150, 40, 5)
+
+        # --- NEW: Duplicate handling selectbox ---
+        dup_mode = st.selectbox(
+        "Duplicate handling",
+        ["Ignore exact duplicates (recommended)", "Aggregate duplicates (sum amounts)", "Keep all (strict)"],
+        index=0,
+        help="How to treat multiple identical lines per SSN/Plan."
+    )
         c1, c2 = st.columns(2)
         with c1:
             run_clicked = st.button("Run Reconciliation", type="primary")
@@ -473,6 +523,28 @@ with run_tab:
             for df in (p_df, c_df, b_df):
                 if df is not None and not df.empty and "Plan Name" in df.columns:
                     apply_aliases_to_df(df, "Plan Name", aliases, threshold=threshold)
+
+            dup_notes = []
+
+            def _apply_dup_mode(df, label):
+                if df is None or df.empty:
+                    return df
+                if dup_mode == "Ignore exact duplicates (recommended)":
+                    new_df, removed = dedupe_exact(df)
+                    if removed:
+                        dup_notes.append(f"{label}: removed {removed} exact duplicate row(s)")
+                    return new_df
+                elif dup_mode == "Aggregate duplicates (sum amounts)":
+                    new_df, removed = aggregate_duplicates(df)
+                    if removed:
+                        dup_notes.append(f"{label}: aggregated {removed} row(s) into keys")
+                    return new_df
+                # Keep all (strict)
+                return df
+
+            p_df = _apply_dup_mode(p_df, "Payroll")
+            c_df = _apply_dup_mode(c_df, "Carrier")
+            b_df = _apply_dup_mode(b_df, "BenAdmin")        
 
             if p_df is not None and c_df is not None and b_df is not None:
                 errors_df, summary_df = reconcile_three(p_df, c_df, b_df, plan_match_threshold=threshold)
