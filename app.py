@@ -531,6 +531,8 @@ with run_tab:
             amount_tolerance_cents = st.slider("Amount tolerance (cents)", 0, 25, 2, 1)
             minutes_per_line = st.slider("Manual mins per line (for ROI)", 0.5, 3.0, 1.2, 0.1)
             hourly_rate = st.slider("Hourly cost ($)", 15, 150, 40, 5)
+            smart_cleanup = st.checkbox("Smart cleanup (recommended)", value=True, help="Auto-resolve split-line, frequency, rounding and blank↔$0 cases.")
+
         run_clicked = st.button("Run Reconciliation", type="primary", use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -630,32 +632,67 @@ with run_tab:
                         if not errors_df.empty:
                             summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
                             summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
+            # Snapshot raw errors/summary BEFORE any smart cleanup
+            errors_df_raw = errors_df.copy() if errors_df is not None else pd.DataFrame()
+            summary_df_raw = (summary_df.copy()
+                            if summary_df is not None else pd.DataFrame({"Error Type": ["Total"], "Count": [0]}))
+            raw_total_errors = int(summary_df_raw[summary_df_raw["Error Type"].str.lower()=="total"]["Count"].sum() or 0)
 
             st.success(f"Completed: {mode}")
             if freq_resolved:
                 st.caption(f"Resolved {freq_resolved} premium differences by recognizing monthly/per-pay frequency scaling.")
 
             # --- Postfilters
-            # A) collapse drilldown rows when per-key sums already match
-            errors_df, dropped_rd = postfilter_row_detail_totals(errors_df, amount_tolerance_cents)
-            if dropped_rd:
-                if not errors_df.empty:
-                    summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
-                    summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
-                st.caption(f"Collapsed {dropped_rd} split-line mismatches whose totals matched within {amount_tolerance_cents}¢.")
+            # --- Postfilters (only if Smart cleanup ON)
+            dropped_rd = 0
+            dropped_freq = 0
 
-            # B) FINAL GUARD: normalized-plan, frequency+slack totals match
-            try:
-                errors_df, dropped_freq = postfilter_keys_matching_by_frequency(
-                    errors_df, p_df, b_df, cents=amount_tolerance_cents, extra_cents=30
-                )
-                if dropped_freq:
-                    if not errors_df.empty:
-                        summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
-                        summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
-                    st.caption(f"Resolved {dropped_freq} split/frequency cases (normalized plan key + extra slack).")
-            except Exception:
-                pass
+            if smart_cleanup:
+                # A) collapse drilldown rows when per-key sums already match
+                errors_df, dropped_rd = postfilter_row_detail_totals(errors_df, amount_tolerance_cents)
+                if dropped_rd and not errors_df.empty:
+                    summary_df = (errors_df.groupby("Error Type", dropna=False)
+                                            .size().reset_index(name="Count"))
+                    summary_df = pd.concat(
+                        [summary_df, pd.DataFrame({"Error Type": ["Total"], "Count": [int(summary_df["Count"].sum())]})],
+                        ignore_index=True
+                    )
+                    st.caption(f"Collapsed {dropped_rd} split-line mismatches whose totals matched within {amount_tolerance_cents}¢.")
+
+                # B) FINAL GUARD: normalized-plan, frequency+slack totals match
+                try:
+                    errors_df, dropped_freq = postfilter_keys_matching_by_frequency(
+                        errors_df, p_df, b_df, cents=amount_tolerance_cents, extra_cents=30
+                    )
+                    if dropped_freq:
+                        if not errors_df.empty:
+                            summary_df = (errors_df.groupby("Error Type", dropna=False)
+                                                    .size().reset_index(name="Count"))
+                            summary_df = pd.concat(
+                                [summary_df, pd.DataFrame({"Error Type": ["Total"], "Count": [int(summary_df["Count"].sum())]})],
+                                ignore_index=True
+                            )
+                        st.caption(f"Resolved {dropped_freq} split/frequency cases (normalized plan key + extra slack).")
+                except Exception:
+                    pass
+            else:
+                st.info("Smart cleanup is OFF — showing raw reconciliation results.")
+
+                # --- Raw vs Cleaned metrics
+                clean_total_errors = 0
+                if summary_df is not None and not summary_df.empty:
+                    clean_total_errors = int(summary_df[summary_df["Error Type"].str.lower()=="total"]["Count"].sum() or 0)
+
+                m1, m2, m3 = st.columns(3)
+                with m1: st.metric("Errors (raw)", f"{raw_total_errors:,}")
+                with m2: st.metric("Errors (after cleanup)", f"{clean_total_errors:,}")
+                with m3:
+                    delta = raw_total_errors - clean_total_errors
+                    pct = (delta / raw_total_errors) if raw_total_errors else 0
+                    st.metric("Auto-resolved", f"{delta:,}", f"{pct:.0%} cleaned")
+                if smart_cleanup:
+                    st.caption("Smart cleanup removed false positives caused by split coverages, pay frequency scaling, rounding drift, and blank↔$0 equivalence.")
+
 
             # Insights
             minutes_per_line = 1.2 if 'minutes_per_line' not in locals() else minutes_per_line
