@@ -227,6 +227,31 @@ def aggregate_by_key_distinct(df: pd.DataFrame) -> pd.DataFrame:
         if k in cols: agg[k] = "first"
     return out.groupby(req, dropna=False, as_index=False).agg(agg).reset_index(drop=True)
 
+def totals_by_key_all(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    One row per (SSN, Plan Name) summing *all* lines:
+      - sums Employee/Employer Cost without dropping repeated amounts
+      - keeps First/Last Name from first occurrence
+    Preserves legitimate split components (employee/spouse/child), even when values repeat.
+    """
+    if df is None or df.empty:
+        return df
+    cols = df.columns
+    req = [c for c in ["SSN", "Plan Name"] if c in cols]
+    if not req:
+        return df
+
+    sums = {c: "sum" for c in ["Employee Cost", "Employer Cost"] if c in cols}
+    keep = {c: "first" for c in ["First Name", "Last Name"] if c in cols}
+    agg = {**sums, **keep} if sums else keep
+
+    return (
+        df.groupby(req, dropna=False, as_index=False)
+          .agg(agg)
+          .reset_index(drop=True)
+    )
+
+
 # ---------- Frequency-aware totals engine ----------
 FREQUENCY_FACTORS = [2, 4, 12, 24, 26, 52]  # semi-monthly, weekly-ish, monthly, semi-monthly, bi-weekly, weekly
 
@@ -279,7 +304,7 @@ def totals_by_key(df: pd.DataFrame) -> pd.DataFrame:
     return df.groupby(["SSN","Plan Name"], dropna=False, as_index=False).agg(agg).reset_index(drop=True)
 
 def reconcile_totals_two(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: str, cents: int):
-    A, B = totals_by_key(a), totals_by_key(b)
+    A, B = totals_by_key_all(a), totals_by_key_all(b)
     merged = pd.merge(A, B, on=["SSN","Plan Name"], how="outer", suffixes=(f" ({a_name})", f" ({b_name})"))
     errors = []; freq_resolved = 0
     for _, r in merged.iterrows():
@@ -571,8 +596,13 @@ with run_tab:
                 if removed: dup_notes.append(f"{label}: removed {removed} exact duplicate row(s)")
                 return nd
             p_df = _dedupe(p_df,"Payroll"); c_df = _dedupe(c_df,"Carrier"); b_df = _dedupe(b_df,"BenAdmin")
-            # 5) aggregate by SSN+Plan (distinct amounts) to neutralize split lines
-            p_tot = aggregate_by_key_distinct(p_df); c_tot = aggregate_by_key_distinct(c_df); b_tot = aggregate_by_key_distinct(b_df)
+
+            p_df = p_df.drop_duplicates().reset_index(drop=True) if p_df is not None else None
+            c_df = c_df.drop_duplicates().reset_index(drop=True) if c_df is not None else None
+            b_df = b_df.drop_duplicates().reset_index(drop=True) if b_df is not None else None
+
+            # 5) (no pre-aggregation needed — totals engine will sum all lines)
+            p_tot, c_tot, b_tot = p_df, c_df, b_df
 
             # 6) frequency-aware totals engine
             if p_tot is not None and c_tot is not None and b_tot is not None and not p_tot.empty and not c_tot.empty and not b_tot.empty:
