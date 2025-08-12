@@ -1,4 +1,4 @@
-# app.py — IvyRecon (Smart Reconciliation + Frequency-Aware Totals + Stronger Aliasing)
+# app.py — IvyRecon (Smart Reconciliation + Frequency-Aware Totals + Stronger Aliasing - CLEAN)
 import os, json
 from datetime import datetime
 
@@ -81,27 +81,18 @@ with st.sidebar:
 # ---------------- State & defaults ----------------
 if "aliases" not in st.session_state:
     from_secrets = load_aliases_from_secrets(st)
-
-    # strengthen defaults for STD/LTD/AD&D/voluntary/etc.
     STRONG_DEFAULTS = {
-        "short term disability": [
-            "std","voluntary short term disability","short-term disability","short term dis","std voluntary","voluntary std"
-        ],
-        "long term disability": [
-            "ltd","voluntary long term disability","long-term disability","long term dis","ltd voluntary","voluntary ltd"
-        ],
-        "ad&d": [
-            "add","accidental death and dismemberment","voluntary ad&d","voluntary add","vol add","voluntary"
-        ],
-        "accident": ["accident plan","accident insurance","acc","voluntary accident"],
-        "hospital indemnity": ["hospital indemnity plan","hospital","hi","voluntary hospital indemnity","hospital plan"],
-        "critical illness": ["critical illness plan","critical","ci","voluntary critical illness"],
-        "medical": ["health","med","medical plan","health plan"],
-        "dental": ["dent","dntl","dental plan"],
-        "vision": ["vis","vision plan","vba"],
-        "life": ["basic life","group life","life insurance","voluntary life","vol life","employee life","emp life"]
+        "short term disability": ["std","voluntary short term disability","short-term disability","short term dis","std voluntary","voluntary std"],
+        "long term disability":  ["ltd","voluntary long term disability","long-term disability","long term dis","ltd voluntary","voluntary ltd"],
+        "ad&d":                  ["add","accidental death and dismemberment","voluntary ad&d","voluntary add","vol add","voluntary"],
+        "accident":              ["accident plan","accident insurance","acc","voluntary accident"],
+        "hospital indemnity":    ["hospital indemnity plan","hospital","hi","voluntary hospital indemnity","hospital plan"],
+        "critical illness":      ["critical illness plan","critical","ci","voluntary critical illness"],
+        "medical":               ["health","med","medical plan","health plan"],
+        "dental":                ["dent","dntl","dental plan"],
+        "vision":                ["vis","vision plan","vba"],
+        "life":                  ["basic life","group life","life insurance","voluntary life","vol life","employee life","emp life"],
     }
-
     st.session_state["aliases"] = merge_aliases(
         merge_aliases(DEFAULT_ALIASES, STRONG_DEFAULTS),
         normalize_alias_dict(from_secrets)
@@ -200,56 +191,16 @@ def normalize_amounts(df: pd.DataFrame, tolerance_cents: int, blank_is_zero: boo
             out[col] = out[col].round(2)
     return out
 
-def dedupe_exact(df: pd.DataFrame) -> tuple[pd.DataFrame,int]:
-    if df is None or df.empty: return df, 0
-    key_cols = [c for c in ["SSN","Plan Name","Employee Cost","Employer Cost"] if c in df.columns]
-    if not key_cols: return df, 0
-    before = len(df)
-    out = df.drop_duplicates(subset=key_cols, keep="first").reset_index(drop=True)
-    return out, before - len(out)
-
-def aggregate_by_key_distinct(df: pd.DataFrame) -> pd.DataFrame:
-    """Group by SSN+Plan; sum DISTINCT amounts; keep first/last name."""
+def totals_by_key_all(df: pd.DataFrame) -> pd.DataFrame:
+    """Sum ALL lines per (SSN, Plan Name); keep first/last name."""
     if df is None or df.empty: return df
     cols = df.columns
-    req = [c for c in ["SSN","Plan Name"] if c in cols]
-    if not req: return df
-    out = df.copy()
-    dupe_cols = [c for c in ["SSN","Plan Name","Employee Cost","Employer Cost"] if c in cols]
-    if dupe_cols: out = out.drop_duplicates(subset=dupe_cols, keep="first")
-    def _sum_distinct(s):
-        ss = pd.to_numeric(s, errors="coerce").dropna()
-        return ss.drop_duplicates().sum()
-    agg = {}
-    if "Employee Cost" in cols: agg["Employee Cost"] = _sum_distinct
-    if "Employer Cost" in cols: agg["Employer Cost"] = _sum_distinct
-    for k in ["First Name","Last Name"]:
-        if k in cols: agg[k] = "first"
-    return out.groupby(req, dropna=False, as_index=False).agg(agg).reset_index(drop=True)
-
-def totals_by_key_all(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    One row per (SSN, Plan Name) summing *all* lines:
-      - sums Employee/Employer Cost without dropping repeated amounts
-      - keeps First/Last Name from first occurrence
-    Preserves legitimate split components (employee/spouse/child), even when values repeat.
-    """
-    if df is None or df.empty:
-        return df
-    cols = df.columns
     req = [c for c in ["SSN", "Plan Name"] if c in cols]
-    if not req:
-        return df
-
+    if not req: return df
     sums = {c: "sum" for c in ["Employee Cost", "Employer Cost"] if c in cols}
     keep = {c: "first" for c in ["First Name", "Last Name"] if c in cols}
     agg = {**sums, **keep} if sums else keep
-
-    return (
-        df.groupby(req, dropna=False, as_index=False)
-          .agg(agg)
-          .reset_index(drop=True)
-    )
+    return df.groupby(req, dropna=False, as_index=False).agg(agg).reset_index(drop=True)
 
 # ---------- Frequency-aware totals engine ----------
 FREQUENCY_FACTORS = [2, 4, 12, 24, 26, 52]  # semi-monthly, weekly-ish, monthly, semi-monthly, bi-weekly, weekly
@@ -264,43 +215,21 @@ def _tol_ok(a, b, cents: int) -> bool:
     return abs(aa - bb) <= max(0, int(cents))
 
 def _freq_ok(a, b, cents: int, extra_cents: int = 10):
-    """
-    Return (True, factor_used) if:
-      - a ≈ b, OR
-      - a ≈ b * factor, OR
-      - b ≈ a * factor
-    within (cents + extra_cents) total slack to account for split-line rounding drift.
-    """
-    # direct tolerance first
+    """Return (True, factor) if a≈b or a≈b*f (or b≈a*f) within cents+extra slack."""
     if _tol_ok(a, b, cents):
         return True, 1
-
     try:
         aa = 0.0 if pd.isna(a) else float(a)
         bb = 0.0 if pd.isna(b) else float(b)
     except Exception:
         return False, None
-
     tol = max(0, int(cents)) / 100.0
     extra = max(0, int(extra_cents)) / 100.0
     slack = tol + extra
-
-    best_f = None
     for f in FREQUENCY_FACTORS:
-        if abs(aa - bb * f) <= slack:
-            best_f = f; break
-        if abs(bb - aa * f) <= slack:
-            best_f = f; break
-
-    return (True, best_f) if best_f else (False, None)
-
-def totals_by_key(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["SSN","Plan Name","First Name","Last Name","Employee Cost","Employer Cost"])
-    sums = {c:"sum" for c in ["Employee Cost","Employer Cost"] if c in df.columns}
-    keep = {c:"first" for c in ["First Name","Last Name"] if c in df.columns}
-    agg = {**sums, **keep} if sums else keep
-    return df.groupby(["SSN","Plan Name"], dropna=False, as_index=False).agg(agg).reset_index(drop=True)
+        if abs(aa - bb * f) <= slack: return True, f
+        if abs(bb - aa * f) <= slack: return True, f
+    return False, None
 
 def reconcile_totals_two(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: str, cents: int):
     A, B = totals_by_key_all(a), totals_by_key_all(b)
@@ -315,17 +244,13 @@ def reconcile_totals_two(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: 
         if in_b and not in_a:
             errors.append({"Error Type": f"Missing in {a_name}","SSN": r["SSN"],"First Name": r.get(f"First Name ({a_name})") or r.get(f"First Name ({b_name})"),
                            "Last Name": r.get(f"Last Name ({a_name})") or r.get(f"Last Name ({b_name})"),"Plan Name": r["Plan Name"]}); continue
-        # both present -> compare Employee & Employer with frequency logic
         ee_a, ee_b = r.get(f"Employee Cost ({a_name})",0.0), r.get(f"Employee Cost ({b_name})",0.0)
         er_a, er_b = r.get(f"Employer Cost ({a_name})",0.0), r.get(f"Employer Cost ({b_name})",0.0)
-
         ok_ee, f_ee = _freq_ok(ee_a, ee_b, cents)
         ok_er, f_er = _freq_ok(er_a, er_b, cents)
-
         if ok_ee and ok_er:
             if (f_ee and f_ee != 1) or (f_er and f_er != 1): freq_resolved += 1
-            continue  # treat as match (possibly frequency-resolved)
-
+            continue
         if not ok_ee:
             errors.append({
                 "Error Type":"Employee Amount Mismatch","SSN": r["SSN"],"First Name": r.get(f"First Name ({a_name})") or r.get(f"First Name ({b_name})"),
@@ -338,7 +263,6 @@ def reconcile_totals_two(a: pd.DataFrame, b: pd.DataFrame, a_name: str, b_name: 
                 "Last Name": r.get(f"Last Name ({a_name})") or r.get(f"Last Name ({b_name})"),"Plan Name": r["Plan Name"],
                 f"Employer Cost ({a_name})": er_a, f"Employer Cost ({b_name})": er_b
             })
-
     errors_df = pd.DataFrame(errors)
     if errors_df.empty:
         summary_df = pd.DataFrame({"Error Type":["Total"],"Count":[0]})
@@ -363,7 +287,7 @@ def reconcile_totals_three(p: pd.DataFrame, c: pd.DataFrame, b: pd.DataFrame, ce
     compared = 0
     return errors_df, summary_df, compared, resolved
 
-# Drilldown: run row-level only for mismatched SSN+Plan keys
+# Drilldown: row-level only for mismatched SSN+Plan keys
 def drilldown_row_level_for_keys(p_df, c_df, b_df, keys, threshold):
     if not keys: return pd.DataFrame()
     def _filter(df):
@@ -379,40 +303,30 @@ def drilldown_row_level_for_keys(p_df, c_df, b_df, keys, threshold):
         e, _ = reconcile_two(c2, b2, "Carrier", "BenAdmin", plan_match_threshold=threshold); parts.append(e)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
+# --- Postfilter A: collapse drilldown rows when per-key sums match within tolerance
 def postfilter_row_detail_totals(errors_df: pd.DataFrame, cents: int):
-    """
-    If a key (SSN, Plan) has multiple Employee Amount Mismatch rows from drilldown,
-    and the sum of BenAdmin values ~ Payroll value within tolerance, drop those rows.
-    Works symmetrically if Payroll is split and BenAdmin has one line.
-    """
-    if errors_df is None or errors_df.empty:
-        return errors_df, 0
-
-    df = errors_df.copy()
-    if "Error Type" not in df.columns or "Plan Name" not in df.columns or "SSN" not in df.columns:
-        return errors_df, 0
-
-    mask = df["Error Type"].str.contains("Employee Amount Mismatch", case=False, na=False)
-    if not mask.any():
-        return errors_df, 0
-
-    sub = df[mask].copy()
-
-    # Try to locate the two sides' columns regardless of suffixes
-    def _pick_cols(prefix: str):
-        cols = [c for c in sub.columns if c.lower().startswith(prefix.lower())]
-        return cols[0] if cols else None
-
+    if errors_df is None or errors_df.empty: return errors_df, 0
+    need = {"Error Type","Plan Name","SSN"}
+    if not need.issubset(errors_df.columns): return errors_df, 0
+    mask = errors_df["Error Type"].str.contains("Employee Amount Mismatch", case=False, na=False)
+    if not mask.any(): return errors_df, 0
+    sub = errors_df[mask].copy()
     ee_cols = [c for c in sub.columns if "employee cost (" in c.lower()]
-    if len(ee_cols) < 2:
-        return errors_df, 0
-
+    if len(ee_cols) < 2: return errors_df, 0
     a_col, b_col = ee_cols[0], ee_cols[1]
+    dropped = 0; keep_idx = []
+    for (ssn, plan), g in sub.groupby(["SSN","Plan Name"], dropna=False):
+        a_sum = int(round(pd.to_numeric(g[a_col], errors="coerce").fillna(0).sum() * 100))
+        b_sum = int(round(pd.to_numeric(g[b_col], errors="coerce").fillna(0).sum() * 100))
+        if abs(a_sum - b_sum) <= max(0, int(cents)):
+            dropped += len(g)
+        else:
+            keep_idx.extend(g.index.tolist())
+    keep_idx.extend(errors_df[~mask].index.tolist())
+    filtered = errors_df.loc[sorted(set(keep_idx))].reset_index(drop=True)
+    return filtered, dropped
 
-    dropped = 0
-    keep_idx = []
-
-    # --- Final guard to drop "false positive" amount mismatches caused by split coverage or frequency differences
+# --- Postfilter B (FINAL GUARD): normalized-plan, frequency+slack totals check
 FREQ_FACTORS_SAFE = [2, 4, 12, 24, 26, 52]
 
 def _cents(v):
@@ -421,58 +335,53 @@ def _cents(v):
     except Exception:
         return 0
 
-def _totals_match_with_freq(a_total, b_total, cents: int, extra_cents: int = 20) -> bool:
-    """Return True if totals match within cents or via frequency scaling with slack."""
-    aa = _cents(a_total)
-    bb = _cents(b_total)
+def _totals_match_with_freq(a_total, b_total, cents: int, extra_cents: int = 30) -> bool:
+    aa = _cents(a_total); bb = _cents(b_total)
     slack = max(0, int(cents)) + max(0, int(extra_cents))
-    if abs(aa - bb) <= slack:
-        return True
+    if abs(aa - bb) <= slack: return True
     for f in FREQ_FACTORS_SAFE:
-        if abs(aa - bb * f) <= slack:
-            return True
-        if abs(bb - aa * f) <= slack:
-            return True
+        if abs(aa - bb * f) <= slack: return True
+        if abs(bb - aa * f) <= slack: return True
     return False
+
+def _norm_plan(s) -> str:
+    if s is None: return ""
+    import re
+    t = re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
+    return re.sub(r"\s+", " ", t)
 
 def postfilter_keys_matching_by_frequency(errors_df: pd.DataFrame,
                                           p_df: pd.DataFrame,
                                           b_df: pd.DataFrame,
                                           cents: int,
-                                          extra_cents: int = 20):
-    """
-    For keys (SSN, Plan) with amount mismatches, recompute totals across all lines
-    and drop rows if totals match under common pay frequencies + rounding slack.
-    """
-    if errors_df is None or errors_df.empty:
-        return errors_df, 0
-
-    if not {"Error Type", "SSN", "Plan Name"}.issubset(errors_df.columns):
-        return errors_df, 0
-
-    # Only mismatches
+                                          extra_cents: int = 30):
+    if errors_df is None or errors_df.empty: return errors_df, 0
+    need = {"Error Type","SSN","Plan Name"}
+    if not need.issubset(errors_df.columns): return errors_df, 0
     mask = errors_df["Error Type"].str.contains("Amount Mismatch", case=False, na=False)
-    if not mask.any():
-        return errors_df, 0
+    if not mask.any(): return errors_df, 0
 
     def _totals(df):
         if df is None or df.empty:
-            return pd.DataFrame(columns=["SSN", "Plan Name", "EE", "ER"])
-        g = (
-            df.groupby(["SSN", "Plan Name"], dropna=False, as_index=False)
-              .agg({
-                  "Employee Cost": "sum",
-                  "Employer Cost": "sum"
-              })
-        )
-        return g.rename(columns={"Employee Cost": "EE", "Employer Cost": "ER"})
+            return pd.DataFrame(columns=["SSN","NormPlan","EE","ER","Plan Name"])
+        tmp = df.copy()
+        if "Plan Name" not in tmp.columns or "SSN" not in tmp.columns:
+            return pd.DataFrame(columns=["SSN","NormPlan","EE","ER","Plan Name"])
+        tmp["NormPlan"] = tmp["Plan Name"].apply(_norm_plan)
+        g = (tmp.groupby(["SSN","NormPlan"], dropna=False, as_index=False)
+                 .agg({"Employee Cost":"sum","Employer Cost":"sum","Plan Name":"first"})
+                 .rename(columns={"Employee Cost":"EE","Employer Cost":"ER"}))
+        return g
 
     p_tot = _totals(p_df)
     b_tot = _totals(b_df)
 
-    mism = errors_df.loc[mask, ["SSN", "Plan Name"]].drop_duplicates()
-    merged = mism.merge(p_tot, on=["SSN", "Plan Name"], how="left", suffixes=("", ""))
-    merged = merged.merge(b_tot, on=["SSN", "Plan Name"], how="left", suffixes=("_P", "_B"))
+    errs = errors_df.loc[mask, ["SSN","Plan Name"]].copy()
+    errs["NormPlan"] = errs["Plan Name"].apply(_norm_plan)
+    mism = errs.drop_duplicates(subset=["SSN","NormPlan"])[["SSN","NormPlan"]]
+
+    merged = mism.merge(p_tot, on=["SSN","NormPlan"], how="left", suffixes=("", ""))
+    merged = merged.merge(b_tot, on=["SSN","NormPlan"], how="left", suffixes=("_P","_B"))
 
     resolvable_keys = set()
     for _, r in merged.iterrows():
@@ -481,40 +390,21 @@ def postfilter_keys_matching_by_frequency(errors_df: pd.DataFrame,
         ok_ee = _totals_match_with_freq(ee_p, ee_b, cents, extra_cents)
         ok_er = _totals_match_with_freq(er_p, er_b, cents, extra_cents)
         if ok_ee or ok_er:
-            resolvable_keys.add((str(r["SSN"]), str(r["Plan Name"])))
+            resolvable_keys.add((str(r["SSN"]), str(r["NormPlan"])))
 
-    if not resolvable_keys:
-        return errors_df, 0
+    if not resolvable_keys: return errors_df, 0
 
-    keep_idx = []
-    dropped = 0
+    keep_idx = []; dropped = 0
     for i, row in errors_df.iterrows():
-        if "Amount Mismatch" not in str(row.get("Error Type", "")):
-            keep_idx.append(i)
-            continue
-        key = (str(row.get("SSN")), str(row.get("Plan Name")))
+        if "Amount Mismatch" not in str(row.get("Error Type","")):
+            keep_idx.append(i); continue
+        key = (str(row.get("SSN")), _norm_plan(row.get("Plan Name")))
         if key in resolvable_keys:
             dropped += 1
         else:
             keep_idx.append(i)
 
     filtered = errors_df.loc[keep_idx].reset_index(drop=True)
-    return filtered, dropped
-
-
-    # Group by SSN+Plan and compare summed cents
-    for (ssn, plan), g in sub.groupby(["SSN", "Plan Name"], dropna=False):
-        a_sum = int(round(pd.to_numeric(g[a_col], errors="coerce").fillna(0).sum() * 100))
-        b_sum = int(round(pd.to_numeric(g[b_col], errors="coerce").fillna(0).sum() * 100))
-        if abs(a_sum - b_sum) <= max(0, int(cents)):
-            # drop all these mismatches for this key
-            dropped += len(g)
-        else:
-            keep_idx.extend(g.index.tolist())
-
-    # Add back non-mismatch rows unchanged
-    keep_idx.extend(df[~mask].index.tolist())
-    filtered = df.loc[sorted(set(keep_idx))].reset_index(drop=True)
     return filtered, dropped
 
 # Insights
@@ -535,28 +425,6 @@ def compute_insights(summary_df, errors_df, compared_lines, minutes_per_line, ho
     return {"total_errors":total, "most_common":most, "mismatch_pct":mismatch_pct,
             "error_rate":error_rate, "compared_lines":compared_lines,
             "minutes_saved":minutes_saved,"hours_saved":hours_saved,"dollars_saved":dollars_saved}
-
-    # --- Final frequency-based totals reconciliation for stubborn split/frequency cases
-    try:
-        errors_df, dropped_freq = postfilter_keys_matching_by_frequency(
-            errors_df, p_df, b_df, cents=amount_tolerance_cents, extra_cents=20
-        )
-        if dropped_freq:
-            # Rebuild summary after dropping
-            if not errors_df.empty:
-                summary_df = (
-                    errors_df.groupby("Error Type", dropna=False)
-                            .size().reset_index(name="Count")
-                )
-                summary_df = pd.concat(
-                    [summary_df,
-                    pd.DataFrame({"Error Type": ["Total"],
-                                "Count": [int(summary_df["Count"].sum())]})],
-                    ignore_index=True
-                )
-            st.caption(f"Resolved {dropped_freq} cases by summing all lines + frequency/slack check.")
-    except Exception as _e:
-        pass
 
 def render_quick_insights(ins):
     a,b,c,d,e = st.columns(5)
@@ -656,7 +524,6 @@ with run_tab:
         st.markdown("### Details")
         group_name = st.text_input("Group Name", value="")
         period     = st.text_input("Reporting Period", value="")
-        # keep “Advanced” minimal; sensible defaults
         with st.expander("Advanced (optional)"):
             st.caption("Defaults are battle-tested. Tweak only if needed.")
             threshold = st.slider("Plan Name Match Threshold", 0.5, 1.0, 0.90, 0.01)
@@ -693,36 +560,27 @@ with run_tab:
             p_df = strip_carrier_prefixes(p_df); c_df = strip_carrier_prefixes(c_df); b_df = strip_carrier_prefixes(b_df)
             # 2) apply aliases (assign!)
             aliases = st.session_state["aliases"]
-            p_df = apply_aliases_to_df(p_df, "Plan Name", aliases, threshold=threshold) if p_df is not None else None
-            c_df = apply_aliases_to_df(c_df, "Plan Name", aliases, threshold=threshold) if c_df is not None else None
-            b_df = apply_aliases_to_df(b_df, "Plan Name", aliases, threshold=threshold) if b_df is not None else None
+            p_df = apply_aliases_to_df(p_df, "Plan Name", aliases, threshold=0.90) if p_df is not None else None
+            c_df = apply_aliases_to_df(c_df, "Plan Name", aliases, threshold=0.90) if c_df is not None else None
+            b_df = apply_aliases_to_df(b_df, "Plan Name", aliases, threshold=0.90) if b_df is not None else None
             # 3) amounts normalization
+            amount_tolerance_cents = 2 if 'amount_tolerance_cents' not in locals() else amount_tolerance_cents
+            treat_blank_as_zero = True if 'treat_blank_as_zero' not in locals() else treat_blank_as_zero
             p_df = normalize_amounts(p_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
             c_df = normalize_amounts(c_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
             b_df = normalize_amounts(b_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
             # 4) drop only true whole-row duplicates (keep repeated amounts for split coverages)
-            dup_notes = []
-            def _drop_whole_row_dupes(df, label):
-                if df is None or df.empty: 
-                    return df
-                before = len(df)
-                nd = df.drop_duplicates().reset_index(drop=True)  # no subset → compare full row
-                removed = before - len(nd)
-                if removed:
-                    dup_notes.append(f"{label}: removed {removed} identical row(s)")
-                return nd
+            def _drop_whole_row_dupes(df):
+                if df is None or df.empty: return df
+                return df.drop_duplicates().reset_index(drop=True)
+            p_df = _drop_whole_row_dupes(p_df)
+            c_df = _drop_whole_row_dupes(c_df)
+            b_df = _drop_whole_row_dupes(b_df)
 
-            p_df = _drop_whole_row_dupes(p_df, "Payroll")
-            c_df = _drop_whole_row_dupes(c_df, "Carrier")
-            b_df = _drop_whole_row_dupes(b_df, "BenAdmin")
-
-            p_df = p_df.drop_duplicates().reset_index(drop=True) if p_df is not None else None
-            c_df = c_df.drop_duplicates().reset_index(drop=True) if c_df is not None else None
-            b_df = b_df.drop_duplicates().reset_index(drop=True) if b_df is not None else None
-
-            # 5) (no pre-aggregation needed — totals engine will sum all lines)
+            # 5) totals engine will sum all lines; no pre-aggregation necessary
             p_tot, c_tot, b_tot = p_df, c_df, b_df
 
+            # (optional) debug totals
             with st.expander("Debug totals for a specific SSN/Plan"):
                 dbg_ssn = st.text_input("SSN (exact 9)", value="")
                 dbg_plan = st.text_input("Plan (lowercase contains)", value="")
@@ -740,7 +598,7 @@ with run_tab:
                     _totals(b_df, "BenAdmin")
 
             # 6) frequency-aware totals engine
-            if p_tot is not None and c_tot is not None and b_tot is not None and not p_tot.empty and not c_tot.empty and not b_tot.empty:
+            if all([x is not None and not x.empty for x in [p_tot, c_tot, b_tot]]):
                 errors_df, summary_df, _comp, freq_resolved = reconcile_totals_three(p_tot, c_tot, b_tot, amount_tolerance_cents)
                 mode = "Smart totals (frequency-aware): Payroll vs Carrier vs BenAdmin"
                 compared_lines = len(pd.concat([p_tot, c_tot, b_tot], ignore_index=True))
@@ -761,7 +619,7 @@ with run_tab:
                 mismatch_mask = errors_df["Error Type"].str.contains("Amount Mismatch", case=False, na=False)
                 keys = set(zip(errors_df.loc[mismatch_mask, "SSN"], errors_df.loc[mismatch_mask, "Plan Name"]))
                 if keys:
-                    row_detail = drilldown_row_level_for_keys(p_df, c_df, b_df, keys, threshold)
+                    row_detail = drilldown_row_level_for_keys(p_df, c_df, b_df, keys, 0.90)
                     if row_detail is not None and not row_detail.empty:
                         keep_idx = []
                         for i, r in errors_df.iterrows():
@@ -774,25 +632,34 @@ with run_tab:
                             summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
 
             st.success(f"Completed: {mode}")
-            if dup_notes: st.caption(" • ".join(dup_notes))
             if freq_resolved:
                 st.caption(f"Resolved {freq_resolved} premium differences by recognizing monthly/per-pay frequency scaling.")
 
-            # --- Final safety: collapse split-line mismatches if grouped totals match within tolerance
+            # --- Postfilters
+            # A) collapse drilldown rows when per-key sums already match
             errors_df, dropped_rd = postfilter_row_detail_totals(errors_df, amount_tolerance_cents)
             if dropped_rd:
-                # rebuild summary after dropping rows
                 if not errors_df.empty:
                     summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
-                    summary_df = pd.concat(
-                        [summary_df, pd.DataFrame({"Error Type": ["Total"], "Count": [int(summary_df["Count"].sum())]})],
-                        ignore_index=True
-                    )
+                    summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
                 st.caption(f"Collapsed {dropped_rd} split-line mismatches whose totals matched within {amount_tolerance_cents}¢.")
 
+            # B) FINAL GUARD: normalized-plan, frequency+slack totals match
+            try:
+                errors_df, dropped_freq = postfilter_keys_matching_by_frequency(
+                    errors_df, p_df, b_df, cents=amount_tolerance_cents, extra_cents=30
+                )
+                if dropped_freq:
+                    if not errors_df.empty:
+                        summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
+                        summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
+                    st.caption(f"Resolved {dropped_freq} split/frequency cases (normalized plan key + extra slack).")
+            except Exception:
+                pass
+
             # Insights
-            minutes_per_line = 1.2  # sensible default; still editable in Advanced if needed
-            hourly_rate = 40
+            minutes_per_line = 1.2 if 'minutes_per_line' not in locals() else minutes_per_line
+            hourly_rate = 40 if 'hourly_rate' not in locals() else hourly_rate
             ins = compute_insights(summary_df, errors_df, compared_lines, minutes_per_line, hourly_rate)
             a,b = st.columns([2,1])
             with a: render_quick_insights(ins)
@@ -881,6 +748,7 @@ with help_tab:
         **Exports**: Multi-tab Excel includes Summary, All Errors, and one sheet per error type — branded to IvyRecon.
         """
     )
+
 
 
 
