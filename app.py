@@ -251,7 +251,6 @@ def totals_by_key_all(df: pd.DataFrame) -> pd.DataFrame:
           .reset_index(drop=True)
     )
 
-
 # ---------- Frequency-aware totals engine ----------
 FREQUENCY_FACTORS = [2, 4, 12, 24, 26, 52]  # semi-monthly, weekly-ish, monthly, semi-monthly, bi-weekly, weekly
 
@@ -603,6 +602,22 @@ with run_tab:
 
             # 5) (no pre-aggregation needed — totals engine will sum all lines)
             p_tot, c_tot, b_tot = p_df, c_df, b_df
+
+            with st.expander("Debug totals for a specific SSN/Plan"):
+                dbg_ssn = st.text_input("SSN (exact 9)", value="")
+                dbg_plan = st.text_input("Plan (lowercase contains)", value="")
+                if dbg_ssn and dbg_plan:
+                    def _totals(df, name):
+                        if df is None or df.empty: 
+                            st.write(f"{name}: (no data)"); 
+                            return
+                        sub = df[(df["SSN"] == dbg_ssn) & (df["Plan Name"].astype(str).str.contains(dbg_plan))]
+                        st.write(f"{name} raw lines:", sub[["SSN","Plan Name","Employee Cost","Employer Cost"]])
+                        grp = totals_by_key_all(sub)
+                        st.write(f"{name} totals:", grp)
+                    _totals(p_df, "Payroll")
+                    _totals(c_df, "Carrier")
+                    _totals(b_df, "BenAdmin")
 
             # 6) frequency-aware totals engine
             if p_tot is not None and c_tot is not None and b_tot is not None and not p_tot.empty and not c_tot.empty and not b_tot.empty:
