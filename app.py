@@ -588,13 +588,21 @@ with run_tab:
             p_df = normalize_amounts(p_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
             c_df = normalize_amounts(c_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
             b_df = normalize_amounts(b_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
-            # 4) ignore exact dups
+            # 4) drop only true whole-row duplicates (keep repeated amounts for split coverages)
             dup_notes = []
-            def _dedupe(df,label):
-                nd, removed = dedupe_exact(df)
-                if removed: dup_notes.append(f"{label}: removed {removed} exact duplicate row(s)")
+            def _drop_whole_row_dupes(df, label):
+                if df is None or df.empty: 
+                    return df
+                before = len(df)
+                nd = df.drop_duplicates().reset_index(drop=True)  # no subset → compare full row
+                removed = before - len(nd)
+                if removed:
+                    dup_notes.append(f"{label}: removed {removed} identical row(s)")
                 return nd
-            p_df = _dedupe(p_df,"Payroll"); c_df = _dedupe(c_df,"Carrier"); b_df = _dedupe(b_df,"BenAdmin")
+
+            p_df = _drop_whole_row_dupes(p_df, "Payroll")
+            c_df = _drop_whole_row_dupes(c_df, "Carrier")
+            b_df = _drop_whole_row_dupes(b_df, "BenAdmin")
 
             p_df = p_df.drop_duplicates().reset_index(drop=True) if p_df is not None else None
             c_df = c_df.drop_duplicates().reset_index(drop=True) if c_df is not None else None
