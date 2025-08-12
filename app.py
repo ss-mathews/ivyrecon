@@ -235,18 +235,36 @@ def _tol_ok(a, b, cents:int)->bool:
     except: return False
     return abs(aa - bb) <= max(0,int(cents))/100.0
 
-def _freq_ok(a, b, cents:int):
-    """Return (True, factor_used) if a≈b or a≈b*factor or b≈a*factor within tolerance."""
-    if _tol_ok(a,b,cents): return True, 1
+def _freq_ok(a, b, cents: int, extra_cents: int = 10):
+    """
+    Return (True, factor_used) if:
+      - a ≈ b, OR
+      - a ≈ b * factor, OR
+      - b ≈ a * factor
+    within (cents + extra_cents) total slack to account for split-line rounding drift.
+    """
+    # direct tolerance first
+    if _tol_ok(a, b, cents):
+        return True, 1
+
     try:
         aa = 0.0 if pd.isna(a) else float(a)
         bb = 0.0 if pd.isna(b) else float(b)
-    except:
+    except Exception:
         return False, None
+
+    tol = max(0, int(cents)) / 100.0
+    extra = max(0, int(extra_cents)) / 100.0
+    slack = tol + extra
+
+    best_f = None
     for f in FREQUENCY_FACTORS:
-        if _tol_ok(aa, bb*f, cents): return True, f
-        if _tol_ok(bb, aa*f, cents): return True, f
-    return False, None
+        if abs(aa - bb * f) <= slack:
+            best_f = f; break
+        if abs(bb - aa * f) <= slack:
+            best_f = f; break
+
+    return (True, best_f) if best_f else (False, None)
 
 def totals_by_key(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
