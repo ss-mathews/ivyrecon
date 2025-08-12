@@ -230,10 +230,14 @@ def aggregate_by_key_distinct(df: pd.DataFrame) -> pd.DataFrame:
 # ---------- Frequency-aware totals engine ----------
 FREQUENCY_FACTORS = [2, 4, 12, 24, 26, 52]  # semi-monthly, weekly-ish, monthly, semi-monthly, bi-weekly, weekly
 
-def _tol_ok(a, b, cents:int)->bool:
-    try: aa = 0.0 if pd.isna(a) else float(a); bb = 0.0 if pd.isna(b) else float(b)
-    except: return False
-    return abs(aa - bb) <= max(0,int(cents))/100.0
+def _tol_ok(a, b, cents: int) -> bool:
+    """Compare using integer cents to avoid float drift."""
+    try:
+        aa = 0 if pd.isna(a) else int(round(float(a) * 100))
+        bb = 0 if pd.isna(b) else int(round(float(b) * 100))
+    except Exception:
+        return False
+    return abs(aa - bb) <= max(0, int(cents))
 
 def _freq_ok(a, b, cents: int, extra_cents: int = 10):
     """
@@ -350,6 +354,54 @@ def drilldown_row_level_for_keys(p_df, c_df, b_df, keys, threshold):
     if c2 is not None and b2 is not None and not c2.empty and not b2.empty:
         e, _ = reconcile_two(c2, b2, "Carrier", "BenAdmin", plan_match_threshold=threshold); parts.append(e)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+def postfilter_row_detail_totals(errors_df: pd.DataFrame, cents: int):
+    """
+    If a key (SSN, Plan) has multiple Employee Amount Mismatch rows from drilldown,
+    and the sum of BenAdmin values ~ Payroll value within tolerance, drop those rows.
+    Works symmetrically if Payroll is split and BenAdmin has one line.
+    """
+    if errors_df is None or errors_df.empty:
+        return errors_df, 0
+
+    df = errors_df.copy()
+    if "Error Type" not in df.columns or "Plan Name" not in df.columns or "SSN" not in df.columns:
+        return errors_df, 0
+
+    mask = df["Error Type"].str.contains("Employee Amount Mismatch", case=False, na=False)
+    if not mask.any():
+        return errors_df, 0
+
+    sub = df[mask].copy()
+
+    # Try to locate the two sides' columns regardless of suffixes
+    def _pick_cols(prefix: str):
+        cols = [c for c in sub.columns if c.lower().startswith(prefix.lower())]
+        return cols[0] if cols else None
+
+    ee_cols = [c for c in sub.columns if "employee cost (" in c.lower()]
+    if len(ee_cols) < 2:
+        return errors_df, 0
+
+    a_col, b_col = ee_cols[0], ee_cols[1]
+
+    dropped = 0
+    keep_idx = []
+
+    # Group by SSN+Plan and compare summed cents
+    for (ssn, plan), g in sub.groupby(["SSN", "Plan Name"], dropna=False):
+        a_sum = int(round(pd.to_numeric(g[a_col], errors="coerce").fillna(0).sum() * 100))
+        b_sum = int(round(pd.to_numeric(g[b_col], errors="coerce").fillna(0).sum() * 100))
+        if abs(a_sum - b_sum) <= max(0, int(cents)):
+            # drop all these mismatches for this key
+            dropped += len(g)
+        else:
+            keep_idx.extend(g.index.tolist())
+
+    # Add back non-mismatch rows unchanged
+    keep_idx.extend(df[~mask].index.tolist())
+    filtered = df.loc[sorted(set(keep_idx))].reset_index(drop=True)
+    return filtered, dropped
 
 # Insights
 def compute_insights(summary_df, errors_df, compared_lines, minutes_per_line, hourly_rate):
@@ -560,6 +612,18 @@ with run_tab:
             if dup_notes: st.caption(" • ".join(dup_notes))
             if freq_resolved:
                 st.caption(f"Resolved {freq_resolved} premium differences by recognizing monthly/per-pay frequency scaling.")
+
+            # --- Final safety: collapse split-line mismatches if grouped totals match within tolerance
+            errors_df, dropped_rd = postfilter_row_detail_totals(errors_df, amount_tolerance_cents)
+            if dropped_rd:
+                # rebuild summary after dropping rows
+                if not errors_df.empty:
+                    summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
+                    summary_df = pd.concat(
+                        [summary_df, pd.DataFrame({"Error Type": ["Total"], "Count": [int(summary_df["Count"].sum())]})],
+                        ignore_index=True
+                    )
+                st.caption(f"Collapsed {dropped_rd} split-line mismatches whose totals matched within {amount_tolerance_cents}¢.")
 
             # Insights
             minutes_per_line = 1.2  # sensible default; still editable in Advanced if needed
