@@ -78,6 +78,13 @@ with st.sidebar:
     st.markdown("---")
     st.caption("IvyRecon • Clean reconciliation for Payroll ↔ Carrier ↔ BenAdmin")
 
+    # --- App state & demo flag
+    DEMO_MODE = str(st.secrets.get("DEMO_MODE", os.environ.get("DEMO_MODE", "false"))).lower() == "true"
+
+    # used to force-clear uploaders
+    if "reset_ver" not in st.session_state:
+        st.session_state["reset_ver"] = 0
+
 # ---------------- State & defaults ----------------
 if "aliases" not in st.session_state:
     from_secrets = load_aliases_from_secrets(st)
@@ -304,26 +311,78 @@ def drilldown_row_level_for_keys(p_df, c_df, b_df, keys, threshold):
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 # --- Postfilter A: collapse drilldown rows when per-key sums match within tolerance
-def postfilter_row_detail_totals(errors_df: pd.DataFrame, cents: int):
-    if errors_df is None or errors_df.empty: return errors_df, 0
-    need = {"Error Type","Plan Name","SSN"}
-    if not need.issubset(errors_df.columns): return errors_df, 0
+def postfilter_row_detail_totals(errors_df: pd.DataFrame, cents: int, extra_cents: int = 20):
+    """
+    If a key (SSN, Plan) has multiple Employee Amount Mismatch rows from drilldown,
+    and the totals of the two sides match within tolerance OR by common pay-frequency
+    scaling (monthly vs per-pay), drop those rows for that key.
+    """
+    if errors_df is None or errors_df.empty:
+        return errors_df, 0
+
+    need = {"Error Type", "Plan Name", "SSN"}
+    if not need.issubset(errors_df.columns):
+        return errors_df, 0
+
+    # Focus only on employee-amount mismatches produced by drilldown
     mask = errors_df["Error Type"].str.contains("Employee Amount Mismatch", case=False, na=False)
-    if not mask.any(): return errors_df, 0
+    if not mask.any():
+        return errors_df, 0
+
     sub = errors_df[mask].copy()
+
+    # Try to locate the two sides' Employee Cost columns regardless of suffixes
     ee_cols = [c for c in sub.columns if "employee cost (" in c.lower()]
-    if len(ee_cols) < 2: return errors_df, 0
-    a_col, b_col = ee_cols[0], ee_cols[1]
-    dropped = 0; keep_idx = []
-    for (ssn, plan), g in sub.groupby(["SSN","Plan Name"], dropna=False):
-        a_sum = int(round(pd.to_numeric(g[a_col], errors="coerce").fillna(0).sum() * 100))
-        b_sum = int(round(pd.to_numeric(g[b_col], errors="coerce").fillna(0).sum() * 100))
-        if abs(a_sum - b_sum) <= max(0, int(cents)):
-            dropped += len(g)
+    if len(ee_cols) < 2:
+        return errors_df, 0
+    a_col, b_col = ee_cols[0], ee_cols[1]  # e.g. 'Employee Cost (Payroll)', 'Employee Cost (BenAdmin)'
+
+    # Helpers (work in integer cents to avoid float drift)
+    def _cents(v):
+        try:
+            return 0 if pd.isna(v) else int(round(float(v) * 100))
+        except Exception:
+            return 0
+
+    FREQ_FACTORS = [2, 4, 12, 24, 26, 52]  # semi-mo, weekly-ish, monthly, semi-mo, biweekly, weekly
+    slack = max(0, int(cents)) + max(0, int(extra_cents))
+
+    def _totals_match(a_sum_cents: int, b_sum_cents: int) -> bool:
+        # direct tolerance
+        if abs(a_sum_cents - b_sum_cents) <= slack:
+            return True
+        # frequency scaling tolerance
+        for f in FREQ_FACTORS:
+            if abs(a_sum_cents - b_sum_cents * f) <= slack:
+                return True
+            if abs(b_sum_cents - a_sum_cents * f) <= slack:
+                return True
+        return False
+
+    # Decide which keys to drop entirely
+    drop_keys = set()
+    for (ssn, plan), g in sub.groupby(["SSN", "Plan Name"], dropna=False):
+        a_sum_c = _cents(pd.to_numeric(g[a_col], errors="coerce").fillna(0).sum())
+        b_sum_c = _cents(pd.to_numeric(g[b_col], errors="coerce").fillna(0).sum())
+        if _totals_match(a_sum_c, b_sum_c):
+            drop_keys.add((str(ssn), str(plan)))
+
+    if not drop_keys:
+        return errors_df, 0
+
+    # Keep all non-mismatch rows as-is; drop only the matching keys from the mismatch subset
+    keep_idx = []
+    dropped = 0
+    for i, row in errors_df.iterrows():
+        if not mask.iloc[i]:
+            keep_idx.append(i); continue
+        key = (str(row.get("SSN")), str(row.get("Plan Name")))
+        if key in drop_keys:
+            dropped += 1
         else:
-            keep_idx.extend(g.index.tolist())
-    keep_idx.extend(errors_df[~mask].index.tolist())
-    filtered = errors_df.loc[sorted(set(keep_idx))].reset_index(drop=True)
+            keep_idx.append(i)
+
+    filtered = errors_df.loc[keep_idx].reset_index(drop=True)
     return filtered, dropped
 
 # --- Postfilter B (FINAL GUARD): normalized-plan, frequency+slack totals check
@@ -513,9 +572,22 @@ with run_tab:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("### Upload Files")
         u1,u2,u3 = st.columns(3)
-        with u1: payroll_file  = st.file_uploader("Payroll (CSV/XLSX)",  type=["csv","xlsx"])
-        with u2: carrier_file  = st.file_uploader("Carrier (CSV/XLSX)",  type=["csv","xlsx"])
-        with u3: benadmin_file = st.file_uploader("BenAdmin (CSV/XLSX)", type=["csv","xlsx"])
+        with u1:
+            payroll_file  = st.file_uploader(
+                "Payroll (CSV/XLSX)", type=["csv","xlsx"],
+                key=f"payroll_{st.session_state.reset_ver}"
+            )
+        with u2:
+            carrier_file  = st.file_uploader(
+                "Carrier (CSV/XLSX)", type=["csv","xlsx"],
+                key=f"carrier_{st.session_state.reset_ver}"
+            )
+        with u3:
+            benadmin_file = st.file_uploader(
+                "BenAdmin (CSV/XLSX)", type=["csv","xlsx"],
+                key=f"benadmin_{st.session_state.reset_ver}"
+            )
+
         st.caption("Required Columns: SSN, First Name, Last Name, Plan Name, Employee Cost, Employer Cost")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -531,9 +603,26 @@ with run_tab:
             amount_tolerance_cents = st.slider("Amount tolerance (cents)", 0, 25, 2, 1)
             minutes_per_line = st.slider("Manual mins per line (for ROI)", 0.5, 3.0, 1.2, 0.1)
             hourly_rate = st.slider("Hourly cost ($)", 15, 150, 40, 5)
-            smart_cleanup = st.checkbox("Smart cleanup (recommended)", value=True, help="Auto-resolve split-line, frequency, rounding and blank↔$0 cases.")
+            smart_cleanup = st.checkbox(
+                "Smart cleanup (recommended)",
+                value=True,
+                help="Auto-resolve split-line, pay-frequency, rounding, and blank↔$0 cases."
+            )
+            # Force on in demo mode
+            if DEMO_MODE and not smart_cleanup:
+                smart_cleanup = True
+                st.caption("Demo mode: Smart cleanup forced ON.")
 
-        run_clicked = st.button("Run Reconciliation", type="primary", use_container_width=True)
+        clear_col1, clear_col2 = st.columns(2)
+        with clear_col1:
+            run_clicked = st.button("Run Reconciliation", type="primary", use_container_width=True)
+        with clear_col2:
+            if st.button("Clear All", use_container_width=True):
+                st.session_state.reset_ver += 1  # bumps uploader keys
+                st.cache_data.clear()
+                st.cache_resource.clear()
+                st.rerun()
+
         st.markdown('</div>', unsafe_allow_html=True)
 
     # Load & preview before run
@@ -554,6 +643,8 @@ with run_tab:
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="card">', unsafe_allow_html=True); st.markdown("### Results")
+    if smart_cleanup:
+        st.markdown('<span class="chip" style="background:#ECFDF5;border-color:#D1FAE5;">⚡ AI-powered Smart Cleanup</span>', unsafe_allow_html=True)
 
     if run_clicked:
         try:
@@ -692,7 +783,6 @@ with run_tab:
                     st.metric("Auto-resolved", f"{delta:,}", f"{pct:.0%} cleaned")
                 if smart_cleanup:
                     st.caption("Smart cleanup removed false positives caused by split coverages, pay frequency scaling, rounding drift, and blank↔$0 equivalence.")
-
 
             # Insights
             minutes_per_line = 1.2 if 'minutes_per_line' not in locals() else minutes_per_line
