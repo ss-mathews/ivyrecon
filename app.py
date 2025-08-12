@@ -412,6 +412,96 @@ def postfilter_row_detail_totals(errors_df: pd.DataFrame, cents: int):
     dropped = 0
     keep_idx = []
 
+    # --- Final guard to drop "false positive" amount mismatches caused by split coverage or frequency differences
+FREQ_FACTORS_SAFE = [2, 4, 12, 24, 26, 52]
+
+def _cents(v):
+    try:
+        return 0 if pd.isna(v) else int(round(float(v) * 100))
+    except Exception:
+        return 0
+
+def _totals_match_with_freq(a_total, b_total, cents: int, extra_cents: int = 20) -> bool:
+    """Return True if totals match within cents or via frequency scaling with slack."""
+    aa = _cents(a_total)
+    bb = _cents(b_total)
+    slack = max(0, int(cents)) + max(0, int(extra_cents))
+    if abs(aa - bb) <= slack:
+        return True
+    for f in FREQ_FACTORS_SAFE:
+        if abs(aa - bb * f) <= slack:
+            return True
+        if abs(bb - aa * f) <= slack:
+            return True
+    return False
+
+def postfilter_keys_matching_by_frequency(errors_df: pd.DataFrame,
+                                          p_df: pd.DataFrame,
+                                          b_df: pd.DataFrame,
+                                          cents: int,
+                                          extra_cents: int = 20):
+    """
+    For keys (SSN, Plan) with amount mismatches, recompute totals across all lines
+    and drop rows if totals match under common pay frequencies + rounding slack.
+    """
+    if errors_df is None or errors_df.empty:
+        return errors_df, 0
+
+    if not {"Error Type", "SSN", "Plan Name"}.issubset(errors_df.columns):
+        return errors_df, 0
+
+    # Only mismatches
+    mask = errors_df["Error Type"].str.contains("Amount Mismatch", case=False, na=False)
+    if not mask.any():
+        return errors_df, 0
+
+    def _totals(df):
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["SSN", "Plan Name", "EE", "ER"])
+        g = (
+            df.groupby(["SSN", "Plan Name"], dropna=False, as_index=False)
+              .agg({
+                  "Employee Cost": "sum",
+                  "Employer Cost": "sum"
+              })
+        )
+        return g.rename(columns={"Employee Cost": "EE", "Employer Cost": "ER"})
+
+    p_tot = _totals(p_df)
+    b_tot = _totals(b_df)
+
+    mism = errors_df.loc[mask, ["SSN", "Plan Name"]].drop_duplicates()
+    merged = mism.merge(p_tot, on=["SSN", "Plan Name"], how="left", suffixes=("", ""))
+    merged = merged.merge(b_tot, on=["SSN", "Plan Name"], how="left", suffixes=("_P", "_B"))
+
+    resolvable_keys = set()
+    for _, r in merged.iterrows():
+        ee_p, er_p = r.get("EE_P"), r.get("ER_P")
+        ee_b, er_b = r.get("EE_B"), r.get("ER_B")
+        ok_ee = _totals_match_with_freq(ee_p, ee_b, cents, extra_cents)
+        ok_er = _totals_match_with_freq(er_p, er_b, cents, extra_cents)
+        if ok_ee or ok_er:
+            resolvable_keys.add((str(r["SSN"]), str(r["Plan Name"])))
+
+    if not resolvable_keys:
+        return errors_df, 0
+
+    keep_idx = []
+    dropped = 0
+    for i, row in errors_df.iterrows():
+        if "Amount Mismatch" not in str(row.get("Error Type", "")):
+            keep_idx.append(i)
+            continue
+        key = (str(row.get("SSN")), str(row.get("Plan Name")))
+        if key in resolvable_keys:
+            dropped += 1
+        else:
+            keep_idx.append(i)
+
+    filtered = errors_df.loc[keep_idx].reset_index(drop=True)
+    return filtered, dropped
+
+
     # Group by SSN+Plan and compare summed cents
     for (ssn, plan), g in sub.groupby(["SSN", "Plan Name"], dropna=False):
         a_sum = int(round(pd.to_numeric(g[a_col], errors="coerce").fillna(0).sum() * 100))
@@ -445,6 +535,28 @@ def compute_insights(summary_df, errors_df, compared_lines, minutes_per_line, ho
     return {"total_errors":total, "most_common":most, "mismatch_pct":mismatch_pct,
             "error_rate":error_rate, "compared_lines":compared_lines,
             "minutes_saved":minutes_saved,"hours_saved":hours_saved,"dollars_saved":dollars_saved}
+
+    # --- Final frequency-based totals reconciliation for stubborn split/frequency cases
+    try:
+        errors_df, dropped_freq = postfilter_keys_matching_by_frequency(
+            errors_df, p_df, b_df, cents=amount_tolerance_cents, extra_cents=20
+        )
+        if dropped_freq:
+            # Rebuild summary after dropping
+            if not errors_df.empty:
+                summary_df = (
+                    errors_df.groupby("Error Type", dropna=False)
+                            .size().reset_index(name="Count")
+                )
+                summary_df = pd.concat(
+                    [summary_df,
+                    pd.DataFrame({"Error Type": ["Total"],
+                                "Count": [int(summary_df["Count"].sum())]})],
+                    ignore_index=True
+                )
+            st.caption(f"Resolved {dropped_freq} cases by summing all lines + frequency/slack check.")
+    except Exception as _e:
+        pass
 
 def render_quick_insights(ins):
     a,b,c,d,e = st.columns(5)
