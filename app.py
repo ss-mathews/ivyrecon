@@ -22,25 +22,37 @@ st.markdown(
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Raleway:wght@500;600;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
-      :root { --teal:#18CCAA; --navy:#2F455C; --bg2:#F6F8FA; --line:#E5E7EB; }
-      html, body, [class*="css"] { font-family:"Roboto",system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; color:var(--navy); }
-      h1, h2, h3, h4, h5, h6 { font-family:"Raleway",sans-serif; letter-spacing:.2px; color:var(--navy); }
-      .block-container { padding-top: 0; }
-      .ivy-header { position: sticky; top: 0; z-index: 50; background:#fff; border-bottom:1px solid var(--line); }
-      .ivy-header .wrap { display:flex; align-items:center; justify-content:space-between; padding: 12px 4px; }
-      .ivy-brand { font-weight:700; font-size:18px; letter-spacing:.3px; }
-      .ivy-badge { font-size:12px; padding:.2rem .5rem; border-radius:999px; background:var(--bg2); border:1px solid var(--line); }
-      .stButton>button { background: var(--teal); color:#0F2A37; border:0; padding:.6rem 1rem; border-radius:12px; font-weight:600; }
-      .stButton>button:hover { filter:brightness(0.97); }
-      .card { border:1px solid var(--line); border-radius:16px; background:#fff; padding:16px; margin: 8px 0 16px; }
-      .chip { display:inline-flex; align-items:center; gap:.5rem; padding:.35rem .6rem; border-radius:999px; background:var(--bg2); color:var(--navy); border:1px solid var(--line); font-size:0.9rem; }
-      .chip.red { background:#FFF5F5; border-color:#FEE2E2; }
-      .chip.yellow { background:#FFFBEB; border-color:#FEF3C7; }
-      .chip.blue { background:#EFF6FF; border-color:#DBEAFE; }
-      .chip.green { background:#ECFDF5; border-color:#D1FAE5; }
-      .impact { font-family:"Raleway",sans-serif; font-size:18px; font-weight:600; margin:.25rem 0 0; }
-      .muted { color:#64748B; font-size:12px; }
-    </style>
+  :root { --teal:#18CCAA; --navy:#2F455C; --bg:#FFFFFF; --bg2:#F6F8FA; --line:#E5E7EB; }
+  html, body, [class*="css"] { font-family:"Roboto",system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; color:var(--navy); }
+  h1, h2, h3, h4, h5, h6 { font-family:"Raleway",sans-serif; letter-spacing:.2px; color:var(--navy); }
+  .block-container { padding-top: 0; }
+  .ivy-header { position: sticky; top: 0; z-index: 50; background:#fff; border-bottom:1px solid var(--line); backdrop-filter: saturate(1.2) blur(6px); }
+  .ivy-header .wrap { display:flex; align-items:center; justify-content:space-between; padding: 12px 4px; }
+  .ivy-brand { font-weight:700; font-size:18px; letter-spacing:.3px; }
+  .ivy-badge { font-size:12px; padding:.2rem .5rem; border-radius:999px; background:var(--bg2); border:1px solid var(--line); }
+
+  /* Buttons */
+  .stButton>button { background: var(--teal); color:#0F2A37; border:0; padding:.65rem 1rem; border-radius:12px; font-weight:600; box-shadow: 0 1px 0 rgba(0,0,0,.04); }
+  .stButton>button:hover { filter:brightness(0.97); transform: translateY(-1px); transition: all .15s ease; }
+
+  /* Cards */
+  .card { border:1px solid var(--line); border-radius:16px; background:var(--bg); padding:16px; margin: 8px 0 16px; box-shadow: 0 6px 20px rgba(47,69,92,0.06); }
+  .card h3, .card h4 { margin: 0 0 8px 0; }
+
+  /* Chips */
+  .chip { display:inline-flex; align-items:center; gap:.5rem; padding:.35rem .6rem; border-radius:999px; background:var(--bg2); color:var(--navy); border:1px solid var(--line); font-size:0.9rem; }
+  .chip.red { background:#FFF5F5; border-color:#FEE2E2; }
+  .chip.yellow { background:#FFFBEB; border-color:#FEF3C7; }
+  .chip.blue { background:#EFF6FF; border-color:#DBEAFE; }
+  .chip.green { background:#ECFDF5; border-color:#D1FAE5; }
+
+  /* Section dividers */
+  .section-title { font-family:"Raleway",sans-serif; font-weight:600; margin: 0 0 6px; }
+  .section-sub { color:#64748B; margin: -2px 0 8px; font-size: 12px; }
+
+  /* Dataframe polish */
+  .stDataFrame { border-radius: 12px; overflow: hidden; }
+</style>
     """,
     unsafe_allow_html=True,
 )
@@ -60,6 +72,22 @@ if auth_status is False:
     st.error("Invalid credentials"); st.stop()
 elif auth_status is None:
     st.info("Enter your email and password to continue."); st.stop()
+
+# --- Role-based Access (put this right after you set name/username/auth_status and the early-return checks) ---
+if auth_status:
+    if username == ADMIN_EMAIL:
+        st.session_state["role"] = "admin"
+    else:
+        st.session_state["role"] = "user"
+
+# Optional convenience alias (so you can write USER_ROLE if you want)
+USER_ROLE = st.session_state.get("role", "user")
+
+
+    # Optional: restrict or redirect non-admin users
+    # if st.session_state["role"] != "admin":
+    #     st.warning("You do not have permission to access this page.")
+    #     st.stop()
 
 st.markdown(
     f"""
@@ -531,7 +559,15 @@ def copy_to_clipboard_button(label: str, text: str):
 # ---------------- Tabs ----------------
 st.title("IvyRecon")
 st.caption("Modern, tech-forward reconciliation for Payroll • Carrier • BenAdmin")
-run_tab, dashboard_tab, settings_tab, help_tab = st.tabs(["Run Reconciliation","Summary Dashboard","Settings","Help & Formatting"])
+if USER_ROLE == "admin":
+    run_tab, dashboard_tab, settings_tab, admin_tab, help_tab = st.tabs(
+        ["Run Reconciliation","Summary Dashboard","Settings","Admin","Help & Formatting"]
+    )
+else:
+    run_tab, dashboard_tab, settings_tab, help_tab = st.tabs(
+        ["Run Reconciliation","Summary Dashboard","Settings","Help & Formatting"]
+    )
+
 
 # ---------- SETTINGS: Alias Manager ----------
 with settings_tab:
@@ -570,7 +606,10 @@ with run_tab:
     up_col, opt_col = st.columns([2,1])
     with up_col:
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("### Upload Files")
+        st.markdown('<div class="section-title">Upload Files</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-sub">CSV or Excel. Columns: SSN, First/Last, Plan Name, Employee/Employer Cost</div>', unsafe_allow_html=True)
+        # ... uploaders ...
+        st.markdown('</div>', unsafe_allow_html=True)
         u1,u2,u3 = st.columns(3)
         with u1:
             payroll_file  = st.file_uploader(
@@ -593,7 +632,9 @@ with run_tab:
 
     with opt_col:
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("### Details")
+        st.markdown('<div class="section-title">Details</div>', unsafe_allow_html=True)
+        # ... fields & Advanced expander ...
+        st.markdown('</div>', unsafe_allow_html=True)
         group_name = st.text_input("Group Name", value="")
         period     = st.text_input("Reporting Period", value="")
         with st.expander("Advanced (optional)"):
@@ -849,6 +890,82 @@ with run_tab:
     else:
         st.info("Upload 2 or 3 files and click **Run Reconciliation**.")
     st.markdown('</div>', unsafe_allow_html=True)
+
+    from io import BytesIO
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib import colors
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import inch
+
+def build_summary_pdf(ins: dict, summary_df: pd.DataFrame, group_name: str, period: str) -> bytes:
+    """
+    Creates a 1-page branded executive summary PDF.
+    """
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=LETTER)
+    W, H = LETTER
+
+    # Brand colors
+    TEAL = colors.HexColor("#18CCAA")
+    NAVY = colors.HexColor("#2F455C")
+
+    # Header bar
+    c.setFillColor(TEAL)
+    c.rect(0, H-0.9*inch, W, 0.9*inch, stroke=0, fill=1)
+    c.setFillColor(NAVY)
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(0.75*inch, H-0.55*inch, "IvyRecon — Executive Summary")
+
+    # Meta
+    c.setFillColor(NAVY)
+    c.setFont("Helvetica", 10)
+    c.drawString(0.75*inch, H-1.1*inch, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    c.drawString(0.75*inch, H-1.3*inch, f"Group: {group_name or '-'}    Period: {period or '-'}")
+
+    # Metrics
+    y = H-1.8*inch
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(0.75*inch, y, "Key Metrics")
+    c.setFont("Helvetica", 12)
+    y -= 0.25*inch
+    lines = [
+        f"Lines reconciled: {ins['compared_lines']:,}",
+        f"Error rate: {ins['error_rate']:.1%}",
+        f"Most common error: {ins['most_common']}",
+        f"Plan name mismatches: {ins['mismatch_pct']:.1%}",
+        f"Time saved (hrs): {ins['hours_saved']:.1f}",
+        f"Estimated $ saved: ${ins['dollars_saved']:,.0f}",
+    ]
+    for t in lines:
+        c.drawString(0.9*inch, y, t); y -= 0.22*inch
+
+    # Summary table (top 6)
+    y -= 0.2*inch
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(0.75*inch, y, "Error Summary")
+    y -= 0.25*inch
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(0.9*inch, y, "Type")
+    c.drawRightString(7.25*inch, y, "Count")
+    c.setLineWidth(0.5); c.line(0.9*inch, y-3, 7.25*inch, y-3)
+    c.setFont("Helvetica", 11); y -= 0.2*inch
+
+    if summary_df is not None and not summary_df.empty:
+        top = (summary_df[summary_df["Error Type"].str.lower()!="total"]
+               .sort_values("Count", ascending=False).head(6))
+        for _, r in top.iterrows():
+            c.drawString(0.9*inch, y, str(r["Error Type"])[:60])
+            c.drawRightString(7.25*inch, y, f"{int(r['Count']):,}")
+            y -= 0.2*inch
+
+    # Footer
+    c.setFillColor(colors.grey)
+    c.setFont("Helvetica", 9)
+    c.drawString(0.75*inch, 0.6*inch, "Uploads are not stored. Generated by IvyRecon.")
+    c.showPage(); c.save()
+    buf.seek(0)
+    return buf.getvalue()
+
 
 # ---------- Dashboard / Help ----------
 with dashboard_tab:
