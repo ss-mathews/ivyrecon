@@ -23,10 +23,11 @@ from aliases import (
 st.set_page_config(page_title="IvyRecon", page_icon="🪄", layout="wide")
 st.markdown(
     """
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Raleway:wght@500;600;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
-    <style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Raleway:wght@500;600;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+
+<style>
   :root { --teal:#18CCAA; --navy:#2F455C; --bg:#FFFFFF; --bg2:#F6F8FA; --line:#E5E7EB; }
   html, body, [class*="css"] { font-family:"Roboto",system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; color:var(--navy); }
   h1, h2, h3, h4, h5, h6 { font-family:"Raleway",sans-serif; letter-spacing:.2px; color:var(--navy); }
@@ -61,6 +62,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
 
 # ---------------- Auth ----------------
 ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL") or os.environ.get("ADMIN_EMAIL", "admin@example.com")
@@ -614,14 +616,14 @@ with run_tab:
         st.markdown('<div class="section-title">Upload Files</div>', unsafe_allow_html=True)
         st.markdown('<div class="section-sub">CSV or Excel. Columns: SSN, First/Last, Plan Name, Employee/Employer Cost</div>', unsafe_allow_html=True)
 
-        u1,u2,u3 = st.columns(3)
+        u1, u2, u3 = st.columns(3)
         with u1:
-            payroll_file  = st.file_uploader(
+            payroll_file = st.file_uploader(
                 "Payroll (CSV/XLSX)", type=["csv","xlsx"],
                 key=f"payroll_{st.session_state.reset_ver}"
             )
         with u2:
-            carrier_file  = st.file_uploader(
+            carrier_file = st.file_uploader(
                 "Carrier (CSV/XLSX)", type=["csv","xlsx"],
                 key=f"carrier_{st.session_state.reset_ver}"
             )
@@ -632,7 +634,7 @@ with run_tab:
             )
 
         st.caption("Required Columns: SSN, First Name, Last Name, Plan Name, Employee Cost, Employer Cost")
-        st.markdown('</div>', unsafe_allow_html=True)  # ← close the card ONCE, at the very end
+        st.markdown('</div>', unsafe_allow_html=True)   # <-- close the card AFTER the uploaders
 
     with opt_col:
         st.markdown('<div class="card">', unsafe_allow_html=True)
