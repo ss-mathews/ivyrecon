@@ -6,6 +6,11 @@ import pandas as pd
 import streamlit as st
 import streamlit_authenticator as stauth
 import streamlit.components.v1 as components
+from io import BytesIO
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib import colors
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import inch
 
 from reconcile import reconcile_two, reconcile_three  # row-level (used for drilldown only)
 from excel_export import export_errors_multitab
@@ -84,10 +89,10 @@ if auth_status:
 USER_ROLE = st.session_state.get("role", "user")
 
 
-    # Optional: restrict or redirect non-admin users
-    # if st.session_state["role"] != "admin":
-    #     st.warning("You do not have permission to access this page.")
-    #     st.stop()
+# Optional: restrict or redirect non-admin users
+# if st.session_state["role"] != "admin":
+#     st.warning("You do not have permission to access this page.")
+#     st.stop()
 
 st.markdown(
     f"""
@@ -608,8 +613,7 @@ with run_tab:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown('<div class="section-title">Upload Files</div>', unsafe_allow_html=True)
         st.markdown('<div class="section-sub">CSV or Excel. Columns: SSN, First/Last, Plan Name, Employee/Employer Cost</div>', unsafe_allow_html=True)
-        # ... uploaders ...
-        st.markdown('</div>', unsafe_allow_html=True)
+
         u1,u2,u3 = st.columns(3)
         with u1:
             payroll_file  = st.file_uploader(
@@ -628,7 +632,7 @@ with run_tab:
             )
 
         st.caption("Required Columns: SSN, First Name, Last Name, Plan Name, Employee Cost, Employer Cost")
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)  # ← close the card ONCE, at the very end
 
     with opt_col:
         st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -890,12 +894,6 @@ with run_tab:
     else:
         st.info("Upload 2 or 3 files and click **Run Reconciliation**.")
     st.markdown('</div>', unsafe_allow_html=True)
-
-    from io import BytesIO
-from reportlab.lib.pagesizes import LETTER
-from reportlab.lib import colors
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import inch
 
 def build_summary_pdf(ins: dict, summary_df: pd.DataFrame, group_name: str, period: str) -> bytes:
     """
