@@ -4,6 +4,9 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+# --- Silence old query-params API used by some libs ---
+if hasattr(st, "experimental_get_query_params"):
+    st.experimental_get_query_params = lambda: st.query_params
 import streamlit_authenticator as stauth
 import streamlit.components.v1 as components
 from io import BytesIO
