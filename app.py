@@ -62,7 +62,25 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
+# --- Mobile/Compact CSS additions ---
+st.markdown("""
+<style>
+@media (max-width: 900px){
+  .block-container { padding-left: 8px; padding-right: 8px; }
+  .ivy-header .wrap { padding: 10px 0; }
+  .ivy-brand { font-size: 16px; }
+  .card { padding: 12px; border-radius: 14px; }
+  .stButton>button { width: 100%; padding: .75rem 1rem; border-radius: 12px; }
+  .stDownloadButton>button { width: 100%; }
+  .chip { font-size: 0.85rem; padding:.3rem .55rem; }
+  .stDataFrame { border-radius: 10px; }
+  /* Let wide tables scroll horizontally on phones */
+  .stDataFrame [data-testid="stHorizontalBlock"] { overflow-x: auto; }
+}
+/* Tighter DataFrame header row */
+[data-testid="stDataFrame"] thead tr th { white-space: nowrap; }
+</style>
+""", unsafe_allow_html=True)
 
 # ---------------- Auth ----------------
 ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL") or os.environ.get("ADMIN_EMAIL", "admin@example.com")
@@ -119,6 +137,12 @@ with st.sidebar:
     # used to force-clear uploaders
     if "reset_ver" not in st.session_state:
         st.session_state["reset_ver"] = 0
+
+    # --- Compact (mobile) UI switch ---
+    _q = st.experimental_get_query_params()
+    DEFAULT_COMPACT = "1" in _q.get("compact", []) or "true" in _q.get("compact", [])
+    COMPACT = st.toggle("📱 Compact (mobile)", value=DEFAULT_COMPACT,
+                        help="Simplifies layout for small screens. Tip: add ?compact=1 to the URL")
 
 # ---------------- State & defaults ----------------
 if "aliases" not in st.session_state:
@@ -616,22 +640,18 @@ with run_tab:
         st.markdown('<div class="section-title">Upload Files</div>', unsafe_allow_html=True)
         st.markdown('<div class="section-sub">CSV or Excel. Columns: SSN, First/Last, Plan Name, Employee/Employer Cost</div>', unsafe_allow_html=True)
 
+    if COMPACT:
+        payroll_file  = st.file_uploader("Payroll (CSV/XLSX)",  type=["csv","xlsx"], key=f"payroll_{st.session_state.reset_ver}")
+        carrier_file  = st.file_uploader("Carrier (CSV/XLSX)",  type=["csv","xlsx"], key=f"carrier_{st.session_state.reset_ver}")
+        benadmin_file = st.file_uploader("BenAdmin (CSV/XLSX)", type=["csv","xlsx"], key=f"benadmin_{st.session_state.reset_ver}")
+    else:
         u1, u2, u3 = st.columns(3)
         with u1:
-            payroll_file = st.file_uploader(
-                "Payroll (CSV/XLSX)", type=["csv","xlsx"],
-                key=f"payroll_{st.session_state.reset_ver}"
-            )
+            payroll_file = st.file_uploader("Payroll (CSV/XLSX)",  type=["csv","xlsx"], key=f"payroll_{st.session_state.reset_ver}")
         with u2:
-            carrier_file = st.file_uploader(
-                "Carrier (CSV/XLSX)", type=["csv","xlsx"],
-                key=f"carrier_{st.session_state.reset_ver}"
-            )
+            carrier_file = st.file_uploader("Carrier (CSV/XLSX)",  type=["csv","xlsx"], key=f"carrier_{st.session_state.reset_ver}")
         with u3:
-            benadmin_file = st.file_uploader(
-                "BenAdmin (CSV/XLSX)", type=["csv","xlsx"],
-                key=f"benadmin_{st.session_state.reset_ver}"
-            )
+            benadmin_file = st.file_uploader("BenAdmin (CSV/XLSX)", type=["csv","xlsx"], key=f"benadmin_{st.session_state.reset_ver}")
 
         st.caption("Required Columns: SSN, First Name, Last Name, Plan Name, Employee Cost, Employer Cost")
         st.markdown('</div>', unsafe_allow_html=True)   # <-- close the card AFTER the uploaders
@@ -669,6 +689,13 @@ with run_tab:
                 st.cache_data.clear()
                 st.cache_resource.clear()
                 st.rerun()
+            # One-tap run near top for mobile
+            if COMPACT:
+                st.markdown("<div style='margin-top:-6px'></div>", unsafe_allow_html=True)
+                st.button("▶️ Run Reconciliation", type="primary", key="run_mobile",
+                        on_click=lambda: st.session_state.__setitem__('run_click_proxy', True))
+                run_clicked = st.session_state.get('run_click_proxy', False) or run_clicked
+
 
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -680,13 +707,34 @@ with run_tab:
     if not run_clicked:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("### Previews")
-        pcol,ccol,bcol = st.columns(3)
-        with pcol:
-            st.markdown("#### Payroll");   st.dataframe((p_df.head(12) if p_df is not None else pd.DataFrame()), use_container_width=True); quick_stats(p_df, "Payroll")
-        with ccol:
-            st.markdown("#### Carrier");   st.dataframe((c_df.head(12) if c_df is not None else pd.DataFrame()), use_container_width=True); quick_stats(c_df, "Carrier")
-        with bcol:
-            st.markdown("#### BenAdmin");  st.dataframe((b_df.head(12) if b_df is not None else pd.DataFrame()), use_container_width=True); quick_stats(b_df, "BenAdmin")
+
+        if COMPACT:
+            st.markdown("#### Payroll")
+            st.dataframe((p_df.head(8) if p_df is not None else pd.DataFrame()), use_container_width=True, height=220)
+            quick_stats(p_df, "Payroll")
+
+            st.markdown("#### Carrier")
+            st.dataframe((c_df.head(8) if c_df is not None else pd.DataFrame()), use_container_width=True, height=220)
+            quick_stats(c_df, "Carrier")
+
+            st.markdown("#### BenAdmin")
+            st.dataframe((b_df.head(8) if b_df is not None else pd.DataFrame()), use_container_width=True, height=220)
+            quick_stats(b_df, "BenAdmin")
+        else:
+            pcol, ccol, bcol = st.columns(3)
+            with pcol:
+                st.markdown("#### Payroll")
+                st.dataframe((p_df.head(12) if p_df is not None else pd.DataFrame()), use_container_width=True)
+                quick_stats(p_df, "Payroll")
+            with ccol:
+                st.markdown("#### Carrier")
+                st.dataframe((c_df.head(12) if c_df is not None else pd.DataFrame()), use_container_width=True)
+                quick_stats(c_df, "Carrier")
+            with bcol:
+                st.markdown("#### BenAdmin")
+                st.dataframe((b_df.head(12) if b_df is not None else pd.DataFrame()), use_container_width=True)
+                quick_stats(b_df, "BenAdmin")
+
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="card">', unsafe_allow_html=True); st.markdown("### Results")
@@ -851,7 +899,11 @@ with run_tab:
             with R:
                 st.markdown("**Errors**")
                 if errors_df is not None and not errors_df.empty:
-                    st.dataframe(style_errors(errors_df), use_container_width=True, height=520)
+                    st.dataframe(
+                        style_errors(errors_df),
+                        use_container_width=True,
+                        height=(360 if COMPACT else 520)
+                    )
                 else:
                     st.info("No errors found.")
 
