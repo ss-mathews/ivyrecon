@@ -180,7 +180,8 @@ INVITES_ENABLED = bool(INVITE_SIGNING_KEY and APP_BASE_URL)
 if not INVITES_ENABLED:
     # App still runs; invite features are just hidden/disabled gracefully
     st.sidebar.info("Invites are disabled (missing INVITE_SIGNING_KEY or APP_BASE_URL).")
-
+if st.session_state.get("role") == "admin" and not st.session_state.get("INVITES_ENABLED"):
+    st.info("Invites are disabled (missing INVITE_SIGNING_KEY or APP_BASE_URL). Add them in Settings → Secrets to enable.")
 
 # Optional: show a subtle notice to the admin only
 if (st.session_state.get("authentication_status") 
@@ -210,6 +211,14 @@ def verify_invite_token(token: str) -> Dict[str, Any] | None:
     except InvalidTokenError:
         st.error("Invalid invite link.")
     return None
+
+# --- Invites config (safe defaults) ---
+INVITE_SIGNING_KEY = st.secrets.get("INVITE_SIGNING_KEY") or os.environ.get("INVITE_SIGNING_KEY")
+APP_BASE_URL       = st.secrets.get("APP_BASE_URL")       or os.environ.get("APP_BASE_URL")
+USERS_DB_PATH      = st.secrets.get("USERS_DB_PATH", ".users.json")
+
+INVITES_ENABLED = bool(INVITE_SIGNING_KEY and APP_BASE_URL)
+st.session_state["INVITES_ENABLED"] = INVITES_ENABLED
 
 # ---------------- Auth ----------------
 ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL") or os.environ.get("ADMIN_EMAIL", "admin@example.com")
