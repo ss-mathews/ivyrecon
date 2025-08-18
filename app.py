@@ -324,7 +324,7 @@ if USER_ROLE == "admin":
 
             # --- hash password safely ---
             try:
-                hashed_pw = stauth.Hasher([pwd]).generate()[0]
+                hashed_pw = stauth.Hasher().hash(new_password)
             except Exception as e:
                 st.error(f"Failed to hash password: {e}")
                 st.stop()
