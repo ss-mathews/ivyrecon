@@ -155,8 +155,24 @@ def _get_role(email: str) -> str:
     return (u or {}).get("role", "user")
 
 # ---------- Invites ----------
-INVITE_SIGNING_KEY = st.secrets["INVITE_SIGNING_KEY"]
+# --- Invites config (safe defaults) ---
+INVITE_SIGNING_KEY = (
+    st.secrets.get("INVITE_SIGNING_KEY")
+    or os.environ.get("INVITE_SIGNING_KEY")
+)
+INVITES_ENABLED = bool(INVITE_SIGNING_KEY)
 
+# Optional: show a subtle notice to the admin only
+if (st.session_state.get("authentication_status") 
+    and st.session_state.get("role") == "admin" 
+    and not INVITES_ENABLED):
+    st.caption("Invites are disabled (missing INVITE_SIGNING_KEY). Add it to secrets to enable.")
+
+if st.session_state.get("role", "user") == "admin":
+    ...
+    # show the invite UI
+    ...
+    
 def create_invite_token(email: str, role: str = "user", hours_valid: int = 48) -> str:
     payload = {
         "email": email.lower().strip(),
@@ -744,15 +760,15 @@ def copy_to_clipboard_button(label: str, text: str):
 # ---------------- Tabs ----------------
 st.title("IvyRecon")
 st.caption("Modern, tech-forward reconciliation for Payroll • Carrier • BenAdmin")
-if USER_ROLE == "admin":
+
+if st.session_state.get("role", "user") == "admin":
     run_tab, dashboard_tab, settings_tab, admin_tab, help_tab = st.tabs(
-        ["Run Reconciliation","Summary Dashboard","Settings","Admin","Help & Formatting"]
+        ["Run Reconciliation", "Summary Dashboard", "Settings", "Admin", "Help & Formatting"]
     )
 else:
     run_tab, dashboard_tab, settings_tab, help_tab = st.tabs(
-        ["Run Reconciliation","Summary Dashboard","Settings","Help & Formatting"]
+        ["Run Reconciliation", "Summary Dashboard", "Settings", "Help & Formatting"]
     )
-
 
 # ---------- SETTINGS: Alias Manager ----------
 with settings_tab:
