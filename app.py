@@ -14,6 +14,10 @@ from reportlab.lib.pagesizes import LETTER
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
+import jwt
+from jwt import ExpiredSignatureError, InvalidTokenError
+from pathlib import Path
+from typing import Dict, Any
 
 from reconcile import reconcile_two, reconcile_three  # row-level (used for drilldown only)
 from excel_export import export_errors_multitab
@@ -24,8 +28,13 @@ from aliases import (
 
 # ---------------- Page setup & global style ----------------
 st.set_page_config(page_title="IvyRecon", page_icon="🪄", layout="wide")
-st.markdown(
-    """
+# ---- Global CSS injection (place IMMEDIATELY after st.set_page_config) ----
+def _inject_css_once():
+    if st.session_state.get("_css_done"):
+        return
+    st.session_state["_css_done"] = True
+    st.markdown(
+        """
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Raleway:wght@500;600;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
@@ -40,31 +49,29 @@ st.markdown(
   .ivy-brand { font-weight:700; font-size:18px; letter-spacing:.3px; }
   .ivy-badge { font-size:12px; padding:.2rem .5rem; border-radius:999px; background:var(--bg2); border:1px solid var(--line); }
 
-  /* Buttons */
   .stButton>button { background: var(--teal); color:#0F2A37; border:0; padding:.65rem 1rem; border-radius:12px; font-weight:600; box-shadow: 0 1px 0 rgba(0,0,0,.04); }
   .stButton>button:hover { filter:brightness(0.97); transform: translateY(-1px); transition: all .15s ease; }
 
-  /* Cards */
   .card { border:1px solid var(--line); border-radius:16px; background:var(--bg); padding:16px; margin: 8px 0 16px; box-shadow: 0 6px 20px rgba(47,69,92,0.06); }
   .card h3, .card h4 { margin: 0 0 8px 0; }
 
-  /* Chips */
   .chip { display:inline-flex; align-items:center; gap:.5rem; padding:.35rem .6rem; border-radius:999px; background:var(--bg2); color:var(--navy); border:1px solid var(--line); font-size:0.9rem; }
   .chip.red { background:#FFF5F5; border-color:#FEE2E2; }
   .chip.yellow { background:#FFFBEB; border-color:#FEF3C7; }
   .chip.blue { background:#EFF6FF; border-color:#DBEAFE; }
   .chip.green { background:#ECFDF5; border-color:#D1FAE5; }
 
-  /* Section dividers */
   .section-title { font-family:"Raleway",sans-serif; font-weight:600; margin: 0 0 6px; }
   .section-sub { color:#64748B; margin: -2px 0 8px; font-size: 12px; }
 
-  /* Dataframe polish */
   .stDataFrame { border-radius: 12px; overflow: hidden; }
 </style>
-    """,
-    unsafe_allow_html=True,
-)
+        """,
+        unsafe_allow_html=True,
+    )
+
+_inject_css_once()
+
 # --- Mobile/Compact CSS additions ---
 st.markdown("""
 <style>
@@ -85,10 +92,127 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ---------- Simple Users Store (dev) ----------
+USERS_DB_PATH = Path(st.secrets.get("USERS_DB_PATH", ".users.json"))
+
+def _load_users() -> Dict[str, Any]:
+    if USERS_DB_PATH.exists():
+        try:
+            return json.loads(USERS_DB_PATH.read_text("utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def _save_users(data: Dict[str, Any]):
+    USERS_DB_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+def _ensure_admin_exists():
+    data = _load_users()
+    users = data.get("users", {})
+    admin_email = st.secrets.get("ADMIN_EMAIL") or os.environ.get("ADMIN_EMAIL", "admin@example.com")
+    admin_name  = st.secrets.get("ADMIN_NAME")  or os.environ.get("ADMIN_NAME",  "Admin")
+    admin_hash  = st.secrets.get("ADMIN_PASSWORD_HASH") or os.environ.get("ADMIN_PASSWORD_HASH", "$2b$12$PLACEHOLDER")
+    if admin_email not in users:
+        users[admin_email] = {
+            "email": admin_email,
+            "name": admin_name,
+            "password_hash": admin_hash,
+            "role": "admin",
+            "created_at": datetime.utcnow().isoformat()
+        }
+        data["users"] = users
+        _save_users(data)
+
+def _to_streamlit_auth_credentials() -> Dict[str, Any]:
+    """Convert our users DB to streamlit_authenticator credentials dict."""
+    data = _load_users()
+    users = data.get("users", {})
+    creds = {"usernames": {}}
+    for email, u in users.items():
+        creds["usernames"][email] = {
+            "email": u["email"],
+            "name":  u.get("name") or u["email"],
+            "password": u["password_hash"],
+        }
+    return creds
+
+def _add_user(email: str, name: str, password_hash: str, role: str = "user"):
+    data = _load_users()
+    users = data.get("users", {})
+    users[email] = {
+        "email": email,
+        "name": name or email,
+        "password_hash": password_hash,
+        "role": role,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    data["users"] = users
+    _save_users(data)
+
+def _get_role(email: str) -> str:
+    data = _load_users()
+    u = data.get("users", {}).get(email)
+    return (u or {}).get("role", "user")
+
+# ---------- Invites ----------
+INVITE_SIGNING_KEY = st.secrets["INVITE_SIGNING_KEY"]
+
+def create_invite_token(email: str, role: str = "user", hours_valid: int = 48) -> str:
+    payload = {
+        "email": email.lower().strip(),
+        "role": role,
+        "exp": datetime.utcnow().timestamp() + hours_valid * 3600
+    }
+    return jwt.encode(payload, INVITE_SIGNING_KEY, algorithm="HS256")
+
+def verify_invite_token(token: str) -> Dict[str, Any] | None:
+    try:
+        data = jwt.decode(token, INVITE_SIGNING_KEY, algorithms=["HS256"])
+        return {"email": data["email"], "role": data.get("role", "user")}
+    except ExpiredSignatureError:
+        st.error("Invite link expired.")
+    except InvalidTokenError:
+        st.error("Invalid invite link.")
+    return None
+
 # ---------------- Auth ----------------
 ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL") or os.environ.get("ADMIN_EMAIL", "admin@example.com")
 ADMIN_NAME = st.secrets.get("ADMIN_NAME") or os.environ.get("ADMIN_NAME", "Admin")
 ADMIN_PASSWORD_HASH = st.secrets.get("ADMIN_PASSWORD_HASH") or os.environ.get("ADMIN_PASSWORD_HASH", "$2b$12$PLACEHOLDER")
+
+# ---------- Registration via Invite Link (handle before login) ----------
+qparams = st.query_params  # Streamlit 1.29+
+if qparams.get("register", ["0"])[0] == "1":
+    st.title("Create your IvyRecon account")
+    token = qparams.get("token", [None])[0]
+    info = verify_invite_token(token) if token else None
+
+    if info:
+        email_from_token = info["email"]
+        role_from_token  = info["role"]
+
+        st.write(f"Invited email: **{email_from_token}**")
+        name = st.text_input("Your Name")
+        pwd  = st.text_input("Create Password", type="password")
+        pwd2 = st.text_input("Confirm Password", type="password")
+        agree = st.checkbox("I agree to the Terms of Service")
+
+        if st.button("Create Account", type="primary", use_container_width=True):
+            if not name or not pwd:
+                st.error("Please enter your name and password.")
+            elif pwd != pwd2:
+                st.error("Passwords do not match.")
+            elif not agree:
+                st.error("Please accept the Terms.")
+            else:
+                # hash password using streamlit_authenticator helper
+                hashed = stauth.Hasher([pwd]).generate()[0]
+                _add_user(email_from_token, name, hashed, role_from_token)
+                st.success("Account created. You can now log in.")
+                # optional: clear the register params
+                st.query_params.clear()
+                st.rerun()
+    st.stop()
 
 credentials = {"usernames": {ADMIN_EMAIL: {"email": ADMIN_EMAIL, "name": ADMIN_NAME, "password": ADMIN_PASSWORD_HASH}}}
 authenticator = stauth.Authenticate(credentials=credentials, cookie_name="ivyrecon_cookies", key="ivyrecon_key", cookie_expiry_days=1)
@@ -101,12 +225,39 @@ if auth_status is False:
 elif auth_status is None:
     st.info("Enter your email and password to continue."); st.stop()
 
-# --- Role-based Access (put this right after you set name/username/auth_status and the early-return checks) ---
+# --- Role-based Access (put this right after the early-return checks) ---
 if auth_status:
+    # Decide role (admin vs user). You can expand this later (e.g., manager, read-only).
     if username == ADMIN_EMAIL:
         st.session_state["role"] = "admin"
     else:
         st.session_state["role"] = "user"
+
+# Optional: convenience alias + a small sidebar badge
+USER_ROLE = st.session_state.get("role", "user")
+st.sidebar.caption(f"Role: **{USER_ROLE.title()}**")
+
+# --- Admin-only: Invite new users ---
+if USER_ROLE == "admin":
+    st.sidebar.subheader("Admin Controls")
+    with st.sidebar.expander("Invite a new user"):
+        new_email = st.text_input("New user email")
+        new_name = st.text_input("New user name")
+        new_password = st.text_input("Temporary password", type="password")
+        if st.button("Create User"):
+            if new_email and new_password:
+                # Hash the password before saving
+                hashed_pw = stauth.Hasher([new_password]).generate()[0]
+                # Add user to credentials dict (in production, save to DB/file instead)
+                credentials["usernames"][new_email] = {
+                    "email": new_email,
+                    "name": new_name or new_email.split("@")[0],
+                    "password": hashed_pw,
+                }
+                st.success(f"User {new_email} added. They can now log in.")
+            else:
+                st.error("Email and password are required.")
+
 
 # Optional convenience alias (so you can write USER_ROLE if you want)
 USER_ROLE = st.session_state.get("role", "user")
