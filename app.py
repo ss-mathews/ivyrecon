@@ -285,23 +285,70 @@ st.sidebar.caption(f"Role: **{USER_ROLE.title()}**")
 # --- Admin-only: Invite new users ---
 if USER_ROLE == "admin":
     st.sidebar.subheader("Admin Controls")
+
     with st.sidebar.expander("Invite a new user"):
-        new_email = st.text_input("New user email")
-        new_name = st.text_input("New user name")
-        new_password = st.text_input("Temporary password", type="password")
-        if st.button("Create User"):
-            if new_email and new_password:
-                # Hash the password before saving
-                hashed_pw = stauth.Hasher([new_password]).generate()[0]
-                # Add user to credentials dict (in production, save to DB/file instead)
-                credentials["usernames"][new_email] = {
-                    "email": new_email,
-                    "name": new_name or new_email.split("@")[0],
-                    "password": hashed_pw,
-                }
-                st.success(f"User {new_email} added. They can now log in.")
-            else:
-                st.error("Email and password are required.")
+        # Use a form so we only process when the button is pressed
+        with st.form("invite_user_form"):
+            new_email = st.text_input("New user email")
+            new_name = st.text_input("New user name")
+            new_role = st.selectbox("Role", ["analyst", "viewer", "admin"], index=0)
+            new_password = st.text_input("Temporary password", type="password")
+            confirm_password = st.text_input("Confirm password", type="password")
+            submitted = st.form_submit_button("Create User")
+
+        if submitted:
+            # --- sanitize / validate ---
+            new_email = (new_email or "").strip().lower()
+            new_name = (new_name or "").strip()
+            new_role = (new_role or "").strip()
+
+            if not new_email or "@" not in new_email:
+                st.error("Please enter a valid email."); st.stop()
+            if not new_name:
+                st.error("Please enter the user's name."); st.stop()
+            if new_role not in {"admin", "analyst", "viewer"}:
+                st.error("Please choose a valid role."); st.stop()
+
+            pwd = "" if new_password is None else str(new_password)
+            cpw = "" if confirm_password is None else str(confirm_password)
+            if not pwd:
+                st.error("Please enter a password."); st.stop()
+            if len(pwd) < 8:
+                st.error("Password must be at least 8 characters."); st.stop()
+            if pwd != cpw:
+                st.error("Passwords do not match."); st.stop()
+
+            # Prevent overwrite
+            if new_email in credentials.get("usernames", {}):
+                st.error("That email is already in the user list."); st.stop()
+
+            # --- hash password safely ---
+            try:
+                hashed_pw = stauth.Hasher([pwd]).generate()[0]
+            except Exception as e:
+                st.error(f"Failed to hash password: {e}")
+                st.stop()
+
+            # --- save user (in-memory). For production, write to your users DB/file ---
+            credentials.setdefault("usernames", {})
+            credentials["usernames"][new_email] = {
+                "email": new_email,
+                "name": new_name or new_email.split("@")[0],
+                "password": hashed_pw,
+                "role": new_role,
+            }
+
+            st.success(f"User {new_email} added with role '{new_role}'.")
+            # Recreate the authenticator so the new user is recognized without a full reload
+            authenticator = stauth.Authenticate(
+                credentials=credentials,
+                cookie_name=st.secrets.get("auth", {}).get("cookie_name", "ivyrecon_cookies"),
+                key=st.secrets.get("auth", {}).get("key", "ivyrecon_key"),
+                cookie_expiry_days=int(st.secrets.get("auth", {}).get("cookie_expiry_days", 1)),
+            )
+            # Optional: force a rerun to refresh state
+            st.experimental_rerun()
+
 
 
 # Optional convenience alias (so you can write USER_ROLE if you want)
