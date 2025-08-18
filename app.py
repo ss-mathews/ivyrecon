@@ -26,6 +26,20 @@ from aliases import (
     merge_aliases, apply_aliases_to_df,
 )
 
+import streamlit as st
+import streamlit_authenticator as stauth
+
+# --- Admin account (first user) ---
+ADMIN_EMAIL = "casebuild@ivyengage.com"
+ADMIN_NAME = "Case Build"
+ADMIN_PASSWORD_HASH = "$2b$12$Yx34abcdEXAMPLEHASHEDPASSWORDjP9dYwe"
+
+
+# Create a hashed password for the admin (one-time setup)
+# Replace "yourpassword" with your actual password
+ADMIN_PASSWORD_HASH = stauth.Hasher(["yourpassword"]).generate()[0]
+
+
 # ---------------- Page setup & global style ----------------
 st.set_page_config(page_title="IvyRecon", page_icon="🪄", layout="wide")
 # ---- Global CSS injection (place IMMEDIATELY after st.set_page_config) ----
@@ -220,6 +234,19 @@ USERS_DB_PATH      = st.secrets.get("USERS_DB_PATH", ".users.json")
 INVITES_ENABLED = bool(INVITE_SIGNING_KEY and APP_BASE_URL)
 st.session_state["INVITES_ENABLED"] = INVITES_ENABLED
 
+# --- User credentials store ---
+# Start with just the admin; new users get added later
+credentials = {
+    "usernames": {
+        ADMIN_EMAIL: {
+            "email": ADMIN_EMAIL,
+            "name": ADMIN_NAME,
+            "password": ADMIN_PASSWORD_HASH,
+            "role": "admin",
+        }
+    }
+}
+
 # ---------------- Auth ----------------
 ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL") or os.environ.get("ADMIN_EMAIL", "admin@example.com")
 ADMIN_NAME = st.secrets.get("ADMIN_NAME") or os.environ.get("ADMIN_NAME", "Admin")
@@ -250,8 +277,9 @@ if qparams.get("register", ["0"])[0] == "1":
             elif not agree:
                 st.error("Please accept the Terms.")
             else:
-                # hash password using streamlit_authenticator helper
-                hashed = stauth.Hasher([pwd]).generate()[0]
+                # hash with bcrypt (avoid Hasher API differences)
+                import bcrypt
+                hashed = bcrypt.hashpw(pwd.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
                 _add_user(email_from_token, name, hashed, role_from_token)
                 st.success("Account created. You can now log in.")
                 # optional: clear the register params
@@ -259,8 +287,13 @@ if qparams.get("register", ["0"])[0] == "1":
                 st.rerun()
     st.stop()
 
-credentials = {"usernames": {ADMIN_EMAIL: {"email": ADMIN_EMAIL, "name": ADMIN_NAME, "password": ADMIN_PASSWORD_HASH}}}
-authenticator = stauth.Authenticate(credentials=credentials, cookie_name="ivyrecon_cookies", key="ivyrecon_key", cookie_expiry_days=1)
+# IMPORTANT: Build the authenticator ONCE (keep this one; remove others elsewhere)
+authenticator = stauth.Authenticate(
+    credentials=credentials,  # make sure this was defined/loaded earlier
+    cookie_name=st.secrets.get("auth", {}).get("cookie_name", "ivyrecon_cookies"),
+    key=st.secrets.get("auth", {}).get("key", "ivyrecon_key"),
+    cookie_expiry_days=int(st.secrets.get("auth", {}).get("cookie_expiry_days", 1)),
+)
 authenticator.login(location="main")
 auth_status = st.session_state.get("authentication_status")
 name = st.session_state.get("name"); username = st.session_state.get("username")
@@ -270,18 +303,15 @@ if auth_status is False:
 elif auth_status is None:
     st.info("Enter your email and password to continue."); st.stop()
 
-# --- Role-based Access (put this right after the early-return checks) ---
+# Role assignment
 if auth_status:
-    # Decide role (admin vs user). You can expand this later (e.g., manager, read-only).
-    if username == ADMIN_EMAIL:
-        st.session_state["role"] = "admin"
-    else:
-        st.session_state["role"] = "user"
+    st.session_state["role"] = "admin" if username == ADMIN_EMAIL else "user"
 
 # Optional: convenience alias + a small sidebar badge
 USER_ROLE = st.session_state.get("role", "user")
 st.sidebar.caption(f"Role: **{USER_ROLE.title()}**")
 
+# --- Admin-only: Invite new users ---
 # --- Admin-only: Invite new users ---
 if USER_ROLE == "admin":
     st.sidebar.subheader("Admin Controls")
@@ -318,18 +348,14 @@ if USER_ROLE == "admin":
             if pwd != cpw:
                 st.error("Passwords do not match."); st.stop()
 
-            # Prevent overwrite
             if new_email in credentials.get("usernames", {}):
                 st.error("That email is already in the user list."); st.stop()
 
             # --- hash password safely ---
-            try:
-                hashed_pw = stauth.Hasher().hash(new_password)
-            except Exception as e:
-                st.error(f"Failed to hash password: {e}")
-                st.stop()
+            import bcrypt
+            hashed_pw = bcrypt.hashpw(pwd.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-            # --- save user (in-memory). For production, write to your users DB/file ---
+            # --- save user (in-memory). For production, persist to DB/file ---
             credentials.setdefault("usernames", {})
             credentials["usernames"][new_email] = {
                 "email": new_email,
@@ -339,17 +365,8 @@ if USER_ROLE == "admin":
             }
 
             st.success(f"User {new_email} added with role '{new_role}'.")
-            # Recreate the authenticator so the new user is recognized without a full reload
-            authenticator = stauth.Authenticate(
-                credentials=credentials,
-                cookie_name=st.secrets.get("auth", {}).get("cookie_name", "ivyrecon_cookies"),
-                key=st.secrets.get("auth", {}).get("key", "ivyrecon_key"),
-                cookie_expiry_days=int(st.secrets.get("auth", {}).get("cookie_expiry_days", 1)),
-            )
-            # Optional: force a rerun to refresh state
-            st.experimental_rerun()
-
-
+            # IMPORTANT: do not rebuild the authenticator; just rerun
+            st.rerun()
 
 # Optional convenience alias (so you can write USER_ROLE if you want)
 USER_ROLE = st.session_state.get("role", "user")
