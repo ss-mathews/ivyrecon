@@ -30,6 +30,35 @@ import os
 import streamlit as st
 import streamlit_authenticator as stauth
 
+import jwt, time, os
+
+INVITE_SIGNING_KEY = (
+    st.secrets.get("INVITE_SIGNING_KEY") 
+    or os.environ.get("INVITE_SIGNING_KEY") 
+    or "dev-secret"
+)
+
+APP_BASE_URL = (
+    st.secrets.get("APP_BASE_URL")
+    or os.environ.get("APP_BASE_URL")
+    or "http://localhost:8501"
+)
+
+def create_invite_url(email: str, role: str = "user", ttl: int = 86400) -> str:
+    """
+    Generate a signed invite link for a new user.
+    :param email: User's email
+    :param role: Role to assign (default "user")
+    :param ttl: Token lifetime in seconds (default 24h)
+    """
+    payload = {
+        "email": email,
+        "role": role,
+        "exp": int(time.time()) + ttl,  # expiration
+    }
+    token = jwt.encode(payload, INVITE_SIGNING_KEY, algorithm="HS256")
+    return f"{APP_BASE_URL}?register=1&token={token}"
+
 # --- Admin & cookie settings (robust setup) ---
 
 def _secret(name, default=None):
@@ -277,6 +306,7 @@ if qparams.get("register", ["0"])[0] == "1":
     token = qparams.get("token", [None])[0]
     info = verify_invite_token(token) if token else None
 
+
     if info:
         email_from_token = info["email"]
         role_from_token  = info["role"]
@@ -368,6 +398,37 @@ if USER_ROLE == "admin":
 
             if new_email in credentials.get("usernames", {}):
                 st.error("That email is already in the user list."); st.stop()
+
+            # after validating new_email, new_name, new_role, and passwords... (inside `if submitted:`)
+
+            # 1) Make a URL the user can click
+            if not st.secrets.get("APP_BASE_URL"):
+                st.error("APP_BASE_URL is not set in secrets, so I can’t generate an invite link.")
+            else:
+                invite = create_invite_url(new_email, new_role)  # uses your signing key + base url
+                st.success(f"Invite created for {new_email}. Send them this link:")
+                st.code(invite, language="text")
+
+                # Optional: one-click copy button
+                st.button("Copy invite link", on_click=lambda: st.session_state.setdefault("_copy", invite))
+                st.caption("(We haven't wired email—paste this link into an email to the user.)")
+
+            def verify_invite_token(token: str):
+                """
+                Verify the invite token and return its payload (email + role).
+                Returns None if invalid or expired.
+                """
+                try:
+                    payload = jwt.decode(token, INVITE_SIGNING_KEY, algorithms=["HS256"])
+                    return payload
+                except jwt.ExpiredSignatureError:
+                    st.error("This invite link has expired.")
+                    return None
+                except jwt.InvalidTokenError:
+                    st.error("Invalid invite link.")
+                    return None
+    
+                
 
             # --- hash password safely ---
             import bcrypt
