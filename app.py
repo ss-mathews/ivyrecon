@@ -37,7 +37,17 @@ ADMIN_PASSWORD_HASH = "$2b$12$Yx34abcdEXAMPLEHASHEDPASSWORDjP9dYwe"
 
 # Create a hashed password for the admin (one-time setup)
 # Replace "yourpassword" with your actual password
-ADMIN_PASSWORD_HASH = stauth.Hasher(["yourpassword"]).generate()[0]
+# --- Admin constants (read from secrets or env) ---
+ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL") or os.environ.get("ADMIN_EMAIL", "admin@example.com")
+ADMIN_NAME  = st.secrets.get("ADMIN_NAME")  or os.environ.get("ADMIN_NAME",  "Admin")
+
+# IMPORTANT: do NOT hash here; just read the bcrypt hash from secrets
+ADMIN_PASSWORD_HASH = (
+    st.secrets.get("ADMIN_PASSWORD_HASH")
+    or os.environ.get("ADMIN_PASSWORD_HASH")
+    or "$2b$12$PLACEHOLDER"  # fallback so the app still imports; replace in secrets
+)
+
 
 
 # ---------------- Page setup & global style ----------------
