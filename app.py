@@ -26,29 +26,37 @@ from aliases import (
     merge_aliases, apply_aliases_to_df,
 )
 
+import os
 import streamlit as st
 import streamlit_authenticator as stauth
 
-# --- Admin account (first user) ---
-ADMIN_EMAIL = "casebuild@ivyengage.com"
-ADMIN_NAME = "Case Build"
-ADMIN_PASSWORD_HASH = "$2b$12$Yx34abcdEXAMPLEHASHEDPASSWORDjP9dYwe"
+# --- Admin & cookie settings (robust setup) ---
 
+def _secret(name, default=None):
+    """Helper to safely read from st.secrets or env with a fallback."""
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
 
-# Create a hashed password for the admin (one-time setup)
-# Replace "yourpassword" with your actual password
-# --- Admin constants (read from secrets or env) ---
-ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL") or os.environ.get("ADMIN_EMAIL", "admin@example.com")
-ADMIN_NAME  = st.secrets.get("ADMIN_NAME")  or os.environ.get("ADMIN_NAME",  "Admin")
+# Admin account
+ADMIN_EMAIL = _secret("ADMIN_EMAIL", os.environ.get("ADMIN_EMAIL", "admin@example.com"))
+ADMIN_NAME  = _secret("ADMIN_NAME",  os.environ.get("ADMIN_NAME", "Admin"))
 
-# IMPORTANT: do NOT hash here; just read the bcrypt hash from secrets
-ADMIN_PASSWORD_HASH = (
-    st.secrets.get("ADMIN_PASSWORD_HASH")
-    or os.environ.get("ADMIN_PASSWORD_HASH")
-    or "$2b$12$PLACEHOLDER"  # fallback so the app still imports; replace in secrets
-)
+# IMPORTANT: This must be a bcrypt hash (not plaintext)
+# Store in secrets.toml as ADMIN_PASSWORD_HASH
+ADMIN_PASSWORD_HASH = _secret("ADMIN_PASSWORD_HASH", os.environ.get("ADMIN_PASSWORD_HASH", "$2b$12$PLACEHOLDER"))
 
-
+# Cookie/session settings
+_auth = _secret("auth", {}) or {}
+if not isinstance(_auth, dict):
+    _auth = {}
+COOKIE_NAME = _auth.get("cookie_name", "ivyrecon_cookies")
+COOKIE_KEY  = _auth.get("key", "ivyrecon_key")
+try:
+    COOKIE_EXPIRY_DAYS = int(_auth.get("cookie_expiry_days", 1))
+except Exception:
+    COOKIE_EXPIRY_DAYS = 1
 
 # ---------------- Page setup & global style ----------------
 st.set_page_config(page_title="IvyRecon", page_icon="🪄", layout="wide")
