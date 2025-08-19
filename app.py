@@ -2,6 +2,8 @@
 import os, json
 from datetime import datetime
 
+import os, json
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 # --- Silence old query-params API used by some libs ---
@@ -215,6 +217,7 @@ def _get_role(email: str) -> str:
     u = data.get("users", {}).get(email)
     return (u or {}).get("role", "user")
 
+
 # ---------- Invites ----------
 # --- Invites config (safe defaults) ---
 # --- Invites config (safe defaults) ---
@@ -230,11 +233,37 @@ APP_BASE_URL = (
     or ""
 )
 
-USERS_DB_PATH = (
-    st.secrets.get("USERS_DB_PATH")
-    or os.environ.get("USERS_DB_PATH")
-    or ""   # leave empty to run without file-backed user DB
-)
+USERS_DB_PATH = st.secrets.get("USERS_DB_PATH") or os.environ.get("USERS_DB_PATH", ".users.json")
+USERS_DB_PATH = Path(USERS_DB_PATH)
+
+def _load_users() -> dict:
+    """Return {'user@example.com': {'email':..., 'name':..., 'password':..., 'role':...}, ...}"""
+    if not USERS_DB_PATH.exists():
+        return {}
+    try:
+        with open(USERS_DB_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # normalize to dict keyed by email
+        if isinstance(data, list):
+            data = {u["email"].lower(): u for u in data if "email" in u}
+        return {k.lower(): v for k,v in data.items()}
+    except Exception:
+        return {}
+
+def _save_users(users: dict) -> None:
+    USERS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(USERS_DB_PATH, "w", encoding="utf-8") as f:
+        json.dump(users, f, indent=2)
+
+def _add_user(email: str, name: str, password_hash: str, role: str = "analyst"):
+    email = (email or "").strip().lower()
+    users = _load_users()
+    if email in users:
+        raise ValueError("User already exists")
+    users[email] = {"email": email, "name": name, "password": password_hash, "role": role}
+    _save_users(users)
+    return users[email]
+
 
 INVITES_ENABLED = bool(INVITE_SIGNING_KEY and APP_BASE_URL)
 
@@ -300,40 +329,45 @@ ADMIN_NAME = st.secrets.get("ADMIN_NAME") or os.environ.get("ADMIN_NAME", "Admin
 ADMIN_PASSWORD_HASH = st.secrets.get("ADMIN_PASSWORD_HASH") or os.environ.get("ADMIN_PASSWORD_HASH", "$2b$12$PLACEHOLDER")
 
 # ---------- Registration via Invite Link (handle before login) ----------
-qparams = st.query_params  # Streamlit 1.29+
+qparams = st.query_params
 if qparams.get("register", ["0"])[0] == "1":
-    st.title("Create your IvyRecon account")
-    token = qparams.get("token", [None])[0]
-    info = verify_invite_token(token) if token else None
-
-
-    if info:
-        email_from_token = info["email"]
-        role_from_token  = info["role"]
-
-        st.write(f"Invited email: **{email_from_token}**")
-        name = st.text_input("Your Name")
-        pwd  = st.text_input("Create Password", type="password")
-        pwd2 = st.text_input("Confirm Password", type="password")
-        agree = st.checkbox("I agree to the Terms of Service")
-
-        if st.button("Create Account", type="primary", use_container_width=True):
-            if not name or not pwd:
-                st.error("Please enter your name and password.")
-            elif pwd != pwd2:
-                st.error("Passwords do not match.")
-            elif not agree:
-                st.error("Please accept the Terms.")
-            else:
-                # hash with bcrypt (avoid Hasher API differences)
-                import bcrypt
-                hashed = bcrypt.hashpw(pwd.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-                _add_user(email_from_token, name, hashed, role_from_token)
-                st.success("Account created. You can now log in.")
-                # optional: clear the register params
-                st.query_params.clear()
-                st.rerun()
+    ...  # your registration code (what you pasted)
     st.stop()
+
+# ---------- Build credentials dict & authenticator (this is step 2) ----------
+users = _load_users()
+
+# Ensure admin user exists in file storage
+if ADMIN_EMAIL.lower() not in users:
+    users[ADMIN_EMAIL.lower()] = {
+        "email": ADMIN_EMAIL.lower(),
+        "name": ADMIN_NAME,
+        "password": ADMIN_PASSWORD_HASH,
+        "role": "admin",
+    }
+    _save_users(users)
+
+# Convert to streamlit_authenticator format
+credentials = {"usernames": {}}
+for u in users.values():
+    credentials["usernames"][u["email"]] = {
+        "email": u["email"],
+        "name": u.get("name") or u["email"].split("@")[0],
+        "password": u["password"],
+        "role": u.get("role", "analyst"),
+    }
+
+authenticator = stauth.Authenticate(
+    credentials=credentials,
+    cookie_name=st.secrets.get("auth", {}).get("cookie_name", "ivyrecon_cookies"),
+    key=st.secrets.get("auth", {}).get("key", "ivyrecon_key"),
+    cookie_expiry_days=int(st.secrets.get("auth", {}).get("cookie_expiry_days", 1)),
+)
+
+authenticator.login(location="main")
+
+auth_status = st.session_state.get("authentication_status")
+...
 
 # IMPORTANT: Build the authenticator ONCE (keep this one; remove others elsewhere)
 authenticator = stauth.Authenticate(
@@ -345,6 +379,16 @@ authenticator = stauth.Authenticate(
 authenticator.login(location="main")
 auth_status = st.session_state.get("authentication_status")
 name = st.session_state.get("name"); username = st.session_state.get("username")
+
+# --- Role-based Access (Step 3) ---
+if auth_status:
+    if username == ADMIN_EMAIL:
+        st.session_state["role"] = "admin"
+    else:
+        # pull role from our persisted users
+        users = _load_users()
+        user = users.get(username.lower())
+        st.session_state["role"] = user.get("role", "analyst") if user else "analyst"
 
 if auth_status is False:
     st.error("Invalid credentials"); st.stop()
@@ -427,9 +471,7 @@ if USER_ROLE == "admin":
                 except jwt.InvalidTokenError:
                     st.error("Invalid invite link.")
                     return None
-    
-                
-
+        
             # --- hash password safely ---
             import bcrypt
             hashed_pw = bcrypt.hashpw(pwd.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -455,6 +497,62 @@ USER_ROLE = st.session_state.get("role", "user")
 # if st.session_state["role"] != "admin":
 #     st.warning("You do not have permission to access this page.")
 #     st.stop()
+
+# ---------- 4) Build credentials & authenticate (place after the registration block) ----------
+
+# Build a credentials dict from persisted users + the admin bootstrap
+_users = _load_users()  # your helper that reads USERS_DB_PATH
+
+_credentials = {"usernames": {}}
+
+# Admin (always present)
+_credentials["usernames"][ADMIN_EMAIL.lower()] = {
+    "email": ADMIN_EMAIL.lower(),
+    "name": ADMIN_NAME,
+    "password": ADMIN_PASSWORD_HASH,  # already a bcrypt hash
+}
+
+# Invited/registered users (from your users DB)
+for email, u in _users.items():
+    _credentials["usernames"][email.lower()] = {
+        "email": email.lower(),
+        "name": u.get("name") or email.split("@")[0],
+        "password": u.get("password_hash"),  # stored bcrypt hash
+    }
+
+# Create the authenticator ONCE
+authenticator = stauth.Authenticate(
+    credentials=_credentials,
+    cookie_name=(st.secrets.get("auth", {}).get("cookie_name") or "ivyrecon_cookies"),
+    key=(st.secrets.get("auth", {}).get("key") or "ivyrecon_key"),
+    cookie_expiry_days=int(st.secrets.get("auth", {}).get("cookie_expiry_days", 1)),
+)
+
+# Render the login widget and read status from session_state
+authenticator.login(location="main")
+
+auth_status = st.session_state.get("authentication_status")
+name = st.session_state.get("name")
+username = (st.session_state.get("username") or "").lower()
+
+# Early returns
+if auth_status is False:
+    st.error("Invalid credentials"); st.stop()
+elif auth_status is None:
+    st.info("Enter your email and password to continue."); st.stop()
+
+# ---------- 5) Role-based access (place right after the auth early-returns) ----------
+
+if auth_status:
+    if username == ADMIN_EMAIL.lower():
+        role = "admin"
+    else:
+        db = _load_users()
+        role = (db.get(username, {}) or {}).get("role", "analyst")
+    st.session_state["role"] = role
+
+USER_ROLE = st.session_state.get("role", "analyst")
+st.sidebar.caption(f"Role: **{USER_ROLE.title()}**")
 
 st.markdown(
     f"""
