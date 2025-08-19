@@ -46,6 +46,13 @@ APP_BASE_URL = (
     or "http://localhost:8501"
 )
 
+# Step 2: define USERS_DB_PATH here
+USERS_DB_PATH = Path(
+    st.secrets.get("USERS_DB_PATH")
+    or os.environ.get("USERS_DB_PATH")
+    or "/tmp/users.json"   # /tmp works well on Streamlit Cloud
+)
+
 def create_invite_url(email: str, role: str = "user", ttl: int = 86400) -> str:
     """
     Generate a signed invite link for a new user.
@@ -155,19 +162,24 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Simple Users Store (dev) ----------
-USERS_DB_PATH = Path(st.secrets.get("USERS_DB_PATH", ".users.json"))
+# was: USERS_DB_PATH = st.secrets.get("USERS_DB_PATH", "/tmp/users.json")
+USERS_DB_PATH = Path(st.secrets.get("USERS_DB_PATH", "/tmp/users.json"))
 
-def _load_users() -> Dict[str, Any]:
-    if USERS_DB_PATH.exists():
-        try:
-            return json.loads(USERS_DB_PATH.read_text("utf-8"))
-        except Exception:
+
+def _load_users() -> dict:
+    try:
+        if not USERS_DB_PATH.exists():
             return {}
-    return {}
+        with USERS_DB_PATH.open("r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
 
-def _save_users(data: Dict[str, Any]):
-    USERS_DB_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+def _save_users(users: dict) -> None:
+    USERS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with USERS_DB_PATH.open("w", encoding="utf-8") as f:
+        json.dump(users, f, indent=2)
+
 
 def _ensure_admin_exists():
     data = _load_users()
@@ -198,6 +210,16 @@ def _to_streamlit_auth_credentials() -> Dict[str, Any]:
             "password": u["password_hash"],
         }
     return creds
+
+def _ensure_users_file():
+    try:
+        USERS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if not USERS_DB_PATH.exists():
+            USERS_DB_PATH.write_text("[]", encoding="utf-8")
+    except Exception as e:
+        st.error(f"Cannot prepare users DB at {USERS_DB_PATH}: {e}")
+        st.stop()
+
 
 def _add_user(email: str, name: str, password_hash: str, role: str = "user"):
     data = _load_users()
@@ -236,24 +258,19 @@ APP_BASE_URL = (
 USERS_DB_PATH = st.secrets.get("USERS_DB_PATH") or os.environ.get("USERS_DB_PATH", ".users.json")
 USERS_DB_PATH = Path(USERS_DB_PATH)
 
-def _load_users() -> dict:
-    """Return {'user@example.com': {'email':..., 'name':..., 'password':..., 'role':...}, ...}"""
-    if not USERS_DB_PATH.exists():
-        return {}
+def _load_users():
+    _ensure_users_file()
     try:
-        with open(USERS_DB_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # normalize to dict keyed by email
-        if isinstance(data, list):
-            data = {u["email"].lower(): u for u in data if "email" in u}
-        return {k.lower(): v for k,v in data.items()}
+        raw = USERS_DB_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw or "[]")
+        return data if isinstance(data, list) else []
     except Exception:
-        return {}
+        return []
 
-def _save_users(users: dict) -> None:
-    USERS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(USERS_DB_PATH, "w", encoding="utf-8") as f:
-        json.dump(users, f, indent=2)
+def _save_users(data):
+    _ensure_users_file()
+    USERS_DB_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
 
 def _add_user(email: str, name: str, password_hash: str, role: str = "analyst"):
     email = (email or "").strip().lower()
