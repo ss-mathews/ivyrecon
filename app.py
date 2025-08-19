@@ -3,7 +3,6 @@ import os, json
 from datetime import datetime
 
 import os, json
-from pathlib import Path
 import pandas as pd
 import streamlit as st
 # --- Silence old query-params API used by some libs ---
@@ -11,6 +10,7 @@ if hasattr(st, "experimental_get_query_params"):
     st.experimental_get_query_params = lambda: st.query_params
 import streamlit_authenticator as stauth
 import streamlit.components.v1 as components
+from pathlib import Path
 from io import BytesIO
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib import colors
@@ -52,6 +52,22 @@ USERS_DB_PATH = Path(
     or os.environ.get("USERS_DB_PATH")
     or "/tmp/users.json"   # /tmp works well on Streamlit Cloud
 )
+
+def _resolve_users_db_path() -> Path:
+    # Prefer secrets, then env, then a safe default for Streamlit Cloud
+    raw = (
+        st.secrets.get("USERS_DB_PATH")
+        or os.environ.get("USERS_DB_PATH")
+        or "/tmp/users.json"   # good default for Streamlit Cloud
+    )
+    p = Path(raw)
+    # If relative (e.g., ".users.json"), anchor to current working dir
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    return p
+
+USERS_DB_PATH: Path = _resolve_users_db_path()
+
 
 def create_invite_url(email: str, role: str = "user", ttl: int = 86400) -> str:
     """
@@ -164,6 +180,15 @@ st.markdown("""
 
 # was: USERS_DB_PATH = st.secrets.get("USERS_DB_PATH", "/tmp/users.json")
 USERS_DB_PATH = Path(st.secrets.get("USERS_DB_PATH", "/tmp/users.json"))
+
+def _prepare_users_db(path: Path):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text("[]", encoding="utf-8")  # start as empty list if you're storing users in JSON
+    except Exception as e:
+        st.error(f"Cannot prepare users DB at {path}: {e}")
+        st.stop()
 
 
 def _load_users() -> dict:
