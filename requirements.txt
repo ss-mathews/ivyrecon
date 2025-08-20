@@ -1,9 +1,9 @@
 streamlit==1.48.1
 streamlit-authenticator==0.4.2
-pandas
-openpyxl
-reportlab
-pyjwt
-bcrypt
-extra-streamlit-components
-pip freeze > requirements.txt
+pandas>=2.2,<3
+openpyxl>=3.1.2
+reportlab>=4.1.0
+rapidfuzz>=3.9.0
+PyJWT>=2.8.0
+bcrypt>=4.2.0
+extra-streamlit-components>=0.1.80
