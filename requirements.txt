@@ -6,3 +6,4 @@ reportlab
 pyjwt
 bcrypt
 extra-streamlit-components
+pip freeze > requirements.txt
