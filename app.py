@@ -195,6 +195,15 @@ def _inject_css_once():
     )
 _inject_css_once()
 
+# --- Friendly error display ---
+# Hide long technical tracebacks for end users (kept in logs on Streamlit Cloud)
+st.set_option("client.showErrorDetails", False)
+
+def nice_error(msg: str, hint: str | None = None):
+    st.error(msg)
+    if hint:
+        st.caption(hint)
+
 # Mobile/compact CSS
 st.markdown("""
 <style>
@@ -390,6 +399,80 @@ def quick_stats(df: pd.DataFrame, label: str):
     with c1: st.metric(f"{label} Rows", len(df))
     with c2: st.metric(f"{label} Unique Employees", df["SSN"].astype(str).nunique() if "SSN" in df.columns else 0)
     with c3: st.metric(f"{label} Plans", df["Plan Name"].astype(str).nunique() if "Plan Name" in df.columns else 0)
+
+# ---------------- Error-handling & validation helpers ----------------
+MAX_FILE_SIZE_MB = 25
+REQUIRED_COLS = {"SSN", "First Name", "Last Name", "Plan Name", "Employee Cost", "Employer Cost"}
+
+def _filesize_mb(uploaded) -> float:
+    try:
+        return round((uploaded.size or 0) / (1024 * 1024), 2)
+    except Exception:
+        return 0.0
+
+def safe_read(uploaded, label: str) -> pd.DataFrame | None:
+    """Read CSV/XLSX with clear, friendly errors and size/type checks."""
+    if not uploaded:
+        return None
+
+    # 1) Size guard
+    size_mb = _filesize_mb(uploaded)
+    if size_mb > MAX_FILE_SIZE_MB:
+        nice_error(f"{label}: file is too large ({size_mb} MB).",
+                   f"Limit is {MAX_FILE_SIZE_MB} MB. Please trim columns/rows or export a smaller subset.")
+        return None
+
+    # 2) Extension/type guard
+    name = (uploaded.name or "").lower()
+    if not (name.endswith(".csv") or name.endswith(".xlsx") or name.endswith(".xls")):
+        nice_error(f"{label}: unsupported file type.",
+                   "Please upload CSV or Excel (.xlsx / .xls).")
+        return None
+
+    # 3) Read with friendly try/except
+    try:
+        if name.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(uploaded)
+        else:
+            # robust CSV read (excel-like delimiters)
+            df = pd.read_csv(uploaded, dtype=str, engine="python")
+        return df
+    except UnicodeDecodeError:
+        nice_error(f"{label}: could not decode file text.",
+                   "Try re-saving as UTF-8 CSV or Excel.")
+    except Exception as e:
+        nice_error(f"{label}: couldn’t open this file.",
+                   f"Tip: Re-export your report and retry. (Details: {e})")
+    return None
+
+def validate_required_cols(df: pd.DataFrame, label: str) -> bool:
+    """Ensure required columns exist (case-insensitive)."""
+    if df is None or df.empty:
+        nice_error(f"{label}: file appears empty.", "Please check your export and try again.")
+        return False
+
+    # Case-insensitive check
+    lower_map = {c.lower(): c for c in df.columns}
+    missing = [c for c in REQUIRED_COLS if c.lower() not in lower_map]
+    if missing:
+        nice_error(f"{label}: missing required columns: {', '.join(missing)}",
+                   "Required: SSN, First Name, Last Name, Plan Name, Employee Cost, Employer Cost")
+        return False
+    return True
+
+def validate_before_run(p_df, c_df, b_df) -> bool:
+    """Require at least two valid files, and each must include required columns."""
+    present = [x for x in [p_df, c_df, b_df] if x is not None]
+    if len(present) < 2:
+        nice_error("Please upload at least two files to reconcile.",
+                   "Upload any two of Payroll / Carrier / BenAdmin.")
+        return False
+
+    ok = True
+    if p_df is not None: ok &= validate_required_cols(p_df, "Payroll")
+    if c_df is not None: ok &= validate_required_cols(c_df, "Carrier")
+    if b_df is not None: ok &= validate_required_cols(b_df, "BenAdmin")
+    return ok
 
 def render_error_chips(summary_df: pd.DataFrame):
     if summary_df is None or summary_df.empty:
@@ -868,9 +951,13 @@ with run_tab:
         st.markdown('</div>', unsafe_allow_html=True)
 
     # Load & preview before run
-    p_df = standardize_df(load_any(payroll_file))
-    c_df = standardize_df(load_any(carrier_file))
-    b_df = standardize_df(load_any(benadmin_file))
+    p_raw = safe_read(payroll_file, "Payroll")
+    c_raw = safe_read(carrier_file, "Carrier")
+    b_raw = safe_read(benadmin_file, "BenAdmin")
+
+    p_df = standardize_df(p_raw) if p_raw is not None else None
+    c_df = standardize_df(c_raw) if c_raw is not None else None
+    b_df = standardize_df(b_raw) if b_raw is not None else None
 
     if not run_clicked:
         st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -893,79 +980,86 @@ with run_tab:
     if smart_cleanup:
         st.markdown('<span class="chip" style="background:#ECFDF5;border-color:#D1FAE5;">⚡ AI-powered Smart Cleanup</span>', unsafe_allow_html=True)
 
+    if run_clicked and not validate_before_run(p_df, c_df, b_df):
+        st.stop()
+
     if run_clicked:
         try:
-            # 1) vendor prefixes
-            p_df = strip_carrier_prefixes(p_df); c_df = strip_carrier_prefixes(c_df); b_df = strip_carrier_prefixes(b_df)
-            # 2) aliases
-            aliases = st.session_state["aliases"]
-            p_df = apply_aliases_to_df(p_df, "Plan Name", aliases, threshold=0.90) if p_df is not None else None
-            c_df = apply_aliases_to_df(c_df, "Plan Name", aliases, threshold=0.90) if c_df is not None else None
-            b_df = apply_aliases_to_df(b_df, "Plan Name", aliases, threshold=0.90) if b_df is not None else None
-            # 3) amounts normalization
-            amount_tolerance_cents = 2 if 'amount_tolerance_cents' not in locals() else amount_tolerance_cents
-            treat_blank_as_zero = True if 'treat_blank_as_zero' not in locals() else treat_blank_as_zero
-            p_df = normalize_amounts(p_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
-            c_df = normalize_amounts(c_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
-            b_df = normalize_amounts(b_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
-            # 4) drop exact dupes
-            _drop = lambda df: df.drop_duplicates().reset_index(drop=True) if (df is not None and not df.empty) else df
-            p_df, c_df, b_df = _drop(p_df), _drop(c_df), _drop(b_df)
+            with st.spinner("Reconciling…"):
+                # 1) vendor prefixes
+                st.write("• Cleaning vendor prefixes")
+                p_df = strip_carrier_prefixes(p_df); c_df = strip_carrier_prefixes(c_df); b_df = strip_carrier_prefixes(b_df)
 
-            p_tot, c_tot, b_tot = p_df, c_df, b_df
+                # 2) aliases
+                st.write("• Applying plan-name aliases")
+                aliases = st.session_state["aliases"]
+                p_df = apply_aliases_to_df(p_df, "Plan Name", aliases, threshold=0.90) if p_df is not None else None
+                c_df = apply_aliases_to_df(c_df, "Plan Name", aliases, threshold=0.90) if c_df is not None else None
+                b_df = apply_aliases_to_df(b_df, "Plan Name", aliases, threshold=0.90) if b_df is not None else None
 
-            # 6) totals engine
-            if all([x is not None and not x.empty for x in [p_tot, c_tot, b_tot]]):
-                errors_df, summary_df, _comp, freq_resolved = reconcile_totals_three(p_tot, c_tot, b_tot, amount_tolerance_cents)
-                mode = "Smart totals (frequency-aware): Payroll vs Carrier vs BenAdmin"
-                compared_lines = len(pd.concat([p_tot, c_tot, b_tot], ignore_index=True))
-            elif p_tot is not None and c_tot is not None and not p_tot.empty and not c_tot.empty:
-                errors_df, summary_df, compared_lines, freq_resolved = reconcile_totals_two(p_tot, c_tot, "Payroll", "Carrier", amount_tolerance_cents)
-                mode = "Smart totals (frequency-aware): Payroll vs Carrier"
-            elif p_tot is not None and b_tot is not None and not p_tot.empty and not b_tot.empty:
-                errors_df, summary_df, compared_lines, freq_resolved = reconcile_totals_two(p_tot, b_tot, "Payroll", "BenAdmin", amount_tolerance_cents)
-                mode = "Smart totals (frequency-aware): Payroll vs BenAdmin"
-            elif c_tot is not None and b_tot is not None and not c_tot.empty and not b_tot.empty:
-                errors_df, summary_df, compared_lines, freq_resolved = reconcile_totals_two(c_tot, b_tot, "Carrier", "BenAdmin", amount_tolerance_cents)
-                mode = "Smart totals (frequency-aware): Carrier vs BenAdmin"
-            else:
-                st.warning("Please upload at least two files to reconcile."); st.markdown('</div>', unsafe_allow_html=True); st.stop()
+                # 3) amounts normalization
+                st.write("• Normalizing amounts & duplicates")
+                amount_tolerance_cents = 2 if 'amount_tolerance_cents' not in locals() else amount_tolerance_cents
+                treat_blank_as_zero = True if 'treat_blank_as_zero' not in locals() else treat_blank_as_zero
+                p_df = normalize_amounts(p_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
+                c_df = normalize_amounts(c_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
+                b_df = normalize_amounts(b_df, tolerance_cents=amount_tolerance_cents, blank_is_zero=treat_blank_as_zero)
 
-            # 7) drilldown
-            if not errors_df.empty:
-                mismatch_mask = errors_df["Error Type"].str.contains("Amount Mismatch", case=False, na=False)
-                keys = set(zip(errors_df.loc[mismatch_mask, "SSN"], errors_df.loc[mismatch_mask, "Plan Name"]))
-                if keys:
-                    row_detail = drilldown_row_level_for_keys(p_df, c_df, b_df, keys, 0.90)
-                    if row_detail is not None and not row_detail.empty:
-                        keep_idx = []
-                        for i, r in errors_df.iterrows():
-                            if mismatch_mask.iloc[i] and (str(r["SSN"]), str(r["Plan Name"])) in keys:
-                                continue
-                            keep_idx.append(i)
-                        errors_df = pd.concat([errors_df.iloc[keep_idx].reset_index(drop=True), row_detail], ignore_index=True)
-                        if not errors_df.empty:
-                            summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
-                            summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
+                # 4) drop exact dupes
+                _drop = lambda df: df.drop_duplicates().reset_index(drop=True) if (df is not None and not df.empty) else df
+                p_df, c_df, b_df = _drop(p_df), _drop(c_df), _drop(b_df)
 
-            # Snapshot before postfilters
-            errors_df_raw = errors_df.copy() if errors_df is not None else pd.DataFrame()
-            summary_df_raw = (summary_df.copy()
-                              if summary_df is not None else pd.DataFrame({"Error Type": ["Total"], "Count": [0]}))
-            raw_total_errors = int(summary_df_raw[summary_df_raw["Error Type"].str.lower()=="total"]["Count"].sum() or 0)
+                # 5) totals engine selection
+                st.write("• Comparing totals (frequency-aware)")
+                p_tot, c_tot, b_tot = p_df, c_df, b_df
+                if all([x is not None and not x.empty for x in [p_tot, c_tot, b_tot]]):
+                    errors_df, summary_df, _comp, freq_resolved = reconcile_totals_three(p_tot, c_tot, b_tot, amount_tolerance_cents)
+                    mode = "Smart totals (frequency-aware): Payroll vs Carrier vs BenAdmin"
+                    compared_lines = len(pd.concat([p_tot, c_tot, b_tot], ignore_index=True))
+                elif p_tot is not None and c_tot is not None and not p_tot.empty and not c_tot.empty:
+                    errors_df, summary_df, compared_lines, freq_resolved = reconcile_totals_two(p_tot, c_tot, "Payroll", "Carrier", amount_tolerance_cents)
+                    mode = "Smart totals (frequency-aware): Payroll vs Carrier"
+                elif p_tot is not None and b_tot is not None and not p_tot.empty and not b_tot.empty:
+                    errors_df, summary_df, compared_lines, freq_resolved = reconcile_totals_two(p_tot, b_tot, "Payroll", "BenAdmin", amount_tolerance_cents)
+                    mode = "Smart totals (frequency-aware): Payroll vs BenAdmin"
+                elif c_tot is not None and b_tot is not None and not c_tot.empty and not b_tot.empty:
+                    errors_df, summary_df, compared_lines, freq_resolved = reconcile_totals_two(c_tot, b_tot, "Carrier", "BenAdmin", amount_tolerance_cents)
+                    mode = "Smart totals (frequency-aware): Carrier vs BenAdmin"
+                else:
+                    st.warning("Please upload at least two files to reconcile.")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    st.stop()
 
+                # 6) drilldown
+                st.write("• Drilling into remaining mismatches")
+                if not errors_df.empty:
+                    mismatch_mask = errors_df["Error Type"].str.contains("Amount Mismatch", case=False, na=False)
+                    keys = set(zip(errors_df.loc[mismatch_mask, "SSN"], errors_df.loc[mismatch_mask, "Plan Name"]))
+                    if keys:
+                        row_detail = drilldown_row_level_for_keys(p_df, c_df, b_df, keys, 0.90)
+                        if row_detail is not None and not row_detail.empty:
+                            keep_idx = []
+                            for i, r in errors_df.iterrows():
+                                if mismatch_mask.iloc[i] and (str(r["SSN"]), str(r["Plan Name"])) in keys:
+                                    continue
+                                keep_idx.append(i)
+                            errors_df = pd.concat([errors_df.iloc[keep_idx].reset_index(drop=True), row_detail], ignore_index=True)
+                            if not errors_df.empty:
+                                summary_df = errors_df.groupby("Error Type", dropna=False).size().reset_index(name="Count")
+                                summary_df = pd.concat([summary_df, pd.DataFrame({"Error Type":["Total"],"Count":[int(summary_df["Count"].sum())]})], ignore_index=True)
+
+                # Snapshot before postfilters
+                errors_df_raw = errors_df.copy() if errors_df is not None else pd.DataFrame()
+                summary_df_raw = (summary_df.copy() if summary_df is not None else pd.DataFrame({"Error Type": ["Total"], "Count": [0]}))
+                raw_total_errors = int(summary_df_raw[summary_df_raw["Error Type"].str.lower()=="total"]["Count"].sum() or 0)
+
+            # Success banner
             st.success(f"Completed: {mode}")
             if freq_resolved:
                 st.caption(f"Resolved {freq_resolved} premium differences by recognizing monthly/per-pay frequency scaling.")
 
-            # --- Your postfilters & insights from original file (keep as-is) ---
-            # (postfilter_row_detail_totals, postfilter_keys_matching_by_frequency, compute_insights, render_quick_insights, etc.)
-            # ... keep the rest of your original code from here down unchanged ...
-            # (I kept your full blocks in your original paste—no functional changes)
-
-            # ====== Keep your original postfilters + insights + exports block here (unchanged) ======
-            # [PASTE: your existing postfilter_* functions are already defined above; now reuse them here]
-            dropped_rd = 0; dropped_freq = 0
+            # Postfilters
+            dropped_rd = dropped_freq = 0
             if smart_cleanup:
                 errors_df, dropped_rd = postfilter_row_detail_totals(errors_df, amount_tolerance_cents)
                 if dropped_rd and not errors_df.empty:
@@ -983,17 +1077,18 @@ with run_tab:
                     pass
             else:
                 st.info("Smart cleanup is OFF — showing raw reconciliation results.")
-                clean_total_errors = 0
-                if summary_df is not None and not summary_df.empty:
-                    clean_total_errors = int(summary_df[summary_df["Error Type"].str.lower()=="total"]["Count"].sum() or 0)
-                m1, m2, m3 = st.columns(3)
-                with m1: st.metric("Errors (raw)", f"{raw_total_errors:,}")
-                with m2: st.metric("Errors (after cleanup)", f"{clean_total_errors:,}")
-                with m3:
-                    delta = raw_total_errors - clean_total_errors
-                    pct = (delta / raw_total_errors) if raw_total_errors else 0
-                    st.metric("Auto-resolved", f"{delta:,}", f"{pct:.0%} cleaned")
 
+            # Metrics
+            clean_total_errors = 0 if (summary_df is None or summary_df.empty) else int(summary_df[summary_df["Error Type"].str.lower()=="total"]["Count"].sum() or 0)
+            m1, m2, m3 = st.columns(3)
+            with m1: st.metric("Errors (raw)", f"{raw_total_errors:,}")
+            with m2: st.metric("Errors (after cleanup)", f"{clean_total_errors:,}")
+            with m3:
+                delta = raw_total_errors - clean_total_errors
+                pct = (delta / raw_total_errors) if raw_total_errors else 0
+                st.metric("Auto-resolved", f"{delta:,}", f"{pct:.0%} cleaned")
+
+            # Insights
             minutes_per_line = 1.2 if 'minutes_per_line' not in locals() else minutes_per_line
             hourly_rate = 40 if 'hourly_rate' not in locals() else hourly_rate
             ins = compute_insights(summary_df, errors_df, compared_lines, minutes_per_line, hourly_rate)
@@ -1005,6 +1100,7 @@ with run_tab:
 
             render_error_chips(summary_df)
 
+            # Tables
             L,R = st.columns([1,2])
             with L:
                 st.markdown("**Summary**")
@@ -1016,6 +1112,7 @@ with run_tab:
                 else:
                     st.info("No errors found.")
 
+            # Debug & Export (unchanged from your version)
             with st.expander("🔎 Debug Investigator: check an employee/plan across files"):
                 q_ssn  = st.text_input("Enter SSN (9 digits or last 4 ok)")
                 q_plan = st.text_input("Optional: Plan contains (e.g., accident)")
@@ -1051,11 +1148,9 @@ with run_tab:
                 st.caption("Copied")
 
         except Exception as e:
-            st.error(f"Error: {e}"); st.exception(e)
-    else:
-        st.info("Upload 2 or 3 files and click **Run Reconciliation**.")
-    st.markdown('</div>', unsafe_allow_html=True)
-
+            nice_error("We couldn’t complete this run.", "Please re-check your files and try again.")
+            st.exception(e)
+            st.stop()
 
 def build_summary_pdf(ins: dict, summary_df: pd.DataFrame, group_name: str, period: str) -> bytes:
     buf = BytesIO()
